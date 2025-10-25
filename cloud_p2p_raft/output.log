@@ -1,0 +1,76 @@
+[2m2025-10-22T12:56:15.515532Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Starting Raft cluster simulation
+[2m2025-10-22T12:56:15.515732Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1 starting
+[2m2025-10-22T12:56:15.515842Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2 starting
+[2m2025-10-22T12:56:15.515874Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3 starting
+[2m2025-10-22T12:56:15.912665Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3 election timeout, starting election
+[2m2025-10-22T12:56:15.912718Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3 starting election
+[2m2025-10-22T12:56:15.912866Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1 voted for candidate 3
+[2m2025-10-22T12:56:15.912925Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3 became leader for term 1
+[2m2025-10-22T12:56:15.912959Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2 voted for candidate 3
+[2m2025-10-22T12:56:17.518274Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Follower, Term=1, VotedFor=None
+[2m2025-10-22T12:56:17.518298Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Follower, Term=1, VotedFor=None
+[2m2025-10-22T12:56:17.518303Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, VotedFor=Some(3)
+[2m2025-10-22T12:56:17.518312Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Testing user registration with leader 3
+[2m2025-10-22T12:56:17.518325Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Leader 3 registered user alice at 192.168.1.100
+[2m2025-10-22T12:56:17.518332Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Leader 3 registered user bob at 192.168.1.101
+[2m2025-10-22T12:56:17.518340Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Registered users: {"bob": "192.168.1.101", "alice": "192.168.1.100"}
+[2m2025-10-22T12:56:22.520497Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Test completed
+[2m2025-10-22T12:56:29.522796Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 1 ===
+[2m2025-10-22T12:56:29.522842Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Follower, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:29.522861Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Follower, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:29.522878Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:34.523922Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 2 ===
+[2m2025-10-22T12:56:34.524013Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Follower, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:34.524149Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Follower, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:34.524192Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:39.525641Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 3 ===
+[2m2025-10-22T12:56:39.525721Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Follower, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:39.525761Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Follower, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:39.525797Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:40.519751Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m 🔥 Node entering failure state for 20 seconds
+[2m2025-10-22T12:56:41.314529Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2 election timeout, starting election
+[2m2025-10-22T12:56:41.314623Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2 starting election
+[2m2025-10-22T12:56:44.517998Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m 🔥 Node entering failure state for 20 seconds
+[2m2025-10-22T12:56:44.528461Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 4 ===
+[2m2025-10-22T12:56:44.528530Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Follower, Term=1, Status=FAILED
+[2m2025-10-22T12:56:44.528549Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:56:44.528566Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:45.387017Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1 election timeout, starting election
+[2m2025-10-22T12:56:45.387064Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1 starting election
+[2m2025-10-22T12:56:49.530203Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 5 ===
+[2m2025-10-22T12:56:49.530317Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:56:49.530361Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:56:49.530398Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:54.531652Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 6 ===
+[2m2025-10-22T12:56:54.531730Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:56:54.531774Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:56:54.531792Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=ACTIVE
+[2m2025-10-22T12:56:59.533952Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 7 ===
+[2m2025-10-22T12:56:59.534020Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:56:59.534038Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:56:59.534056Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=ACTIVE
+[2m2025-10-22T12:57:04.535294Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 8 ===
+[2m2025-10-22T12:57:04.535361Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:57:04.535383Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:57:04.535404Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=ACTIVE
+[2m2025-10-22T12:57:06.522256Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m 🔥 Node entering failure state for 20 seconds
+[2m2025-10-22T12:57:09.537018Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 9 ===
+[2m2025-10-22T12:57:09.537142Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:57:09.537171Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:57:09.537199Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=FAILED
+[2m2025-10-22T12:57:14.538336Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 10 ===
+[2m2025-10-22T12:57:14.538460Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:57:14.538499Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:57:14.538538Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=FAILED
+[2m2025-10-22T12:57:19.541470Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 11 ===
+[2m2025-10-22T12:57:19.541591Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:57:19.541630Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:57:19.541667Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=FAILED
+[2m2025-10-22T12:57:24.543675Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === Status Check 12 ===
+[2m2025-10-22T12:57:24.543751Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:57:24.543779Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Candidate, Term=2, Status=FAILED
+[2m2025-10-22T12:57:24.543807Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=FAILED
+[2m2025-10-22T12:57:49.546029Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m === After Recovery Check ===
+[2m2025-10-22T12:57:49.546065Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 1: State=Candidate, Term=2, Status=FAILED, Users={}
+[2m2025-10-22T12:57:49.546075Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 2: State=Candidate, Term=2, Status=FAILED, Users={}
+[2m2025-10-22T12:57:49.546140Z[0m [32m INFO[0m [2mcloud_p2p_raft[0m[2m:[0m Node 3: State=Leader, Term=1, Status=FAILED, Users={"bob": "192.168.1.101", "alice": "192.168.1.100"}

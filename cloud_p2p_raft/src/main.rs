@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock, Mutex};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant, sleep};
-use tracing::{info, warn, debug};
+use tracing::{info, debug};
+use once_cell::sync::Lazy;
+
+static NODE_REGISTRY: Lazy<Mutex<Vec<Arc<RaftNode>>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RaftState {
@@ -45,6 +48,8 @@ pub struct RaftNode {
     pub message_bus: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RaftMessage>>>>,
 
     pub failure_simulator: FailureSimulator,
+
+    pub votes_received: Arc<RwLock<HashMap<u64, HashMap<u32, bool>>>>, // term -> voter_id -> granted
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +63,7 @@ pub enum RaftMessage {
     VoteReply {
         term: u64,
         vote_granted: bool,
+        sender_id: u32,
     },
     AppendEntries {
         term: u64,
@@ -101,14 +107,12 @@ impl FailureSimulator {
                 *self.is_failed.write().await = false;
                 *self.failure_start.write().await = None;
                 info!("✅ Node recovered from failure");
-                true
-            } else {
-                false
+                return true;
             }
-        } else {
-            false
         }
+        false
     }
+
     
     pub async fn is_failed(&self) -> bool {
         *self.is_failed.read().await
@@ -130,6 +134,7 @@ impl RaftNode {
             registered_users: Arc::new(RwLock::new(HashMap::new())),
             message_bus: Arc::new(Mutex::new(HashMap::new())),
             failure_simulator: FailureSimulator::new(),
+            votes_received: Arc::new(RwLock::new(HashMap::new())),
         }
     }
     
@@ -186,8 +191,8 @@ impl RaftNode {
                     let reply = self.handle_vote_request(term, candidate_id, last_log_index, last_log_term).await;
                     self.send_message(candidate_id, reply).await;
                 }
-                RaftMessage::VoteReply { term, vote_granted } => {
-                    self.handle_vote_reply(term, vote_granted).await;
+                RaftMessage::VoteReply { term, vote_granted, sender_id } => {
+                    self.handle_vote_reply(term, vote_granted, sender_id).await;
                 }
                 RaftMessage::AppendEntries { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit } => {
                     let reply = self.handle_append_entries(term, leader_id, prev_log_index, prev_log_term, entries, leader_commit).await;
@@ -203,57 +208,91 @@ impl RaftNode {
     async fn election_timeout_loop(&self) {
         loop {
             let timeout_duration = Duration::from_millis(300 + rand::random::<u64>() % 200);
-            sleep(timeout_duration).await;
-            
+            let tick = Duration::from_millis(50);
+            let mut elapsed = Duration::ZERO;
+            while elapsed < timeout_duration {
+                sleep(tick).await;
+                elapsed += tick;
+                // Check if heartbeat received or node failed
+                if self.failure_simulator.is_failed().await {
+                    break;
+                }
+                let last_heartbeat = *self.last_heartbeat.read().await;
+                if last_heartbeat.elapsed() < timeout_duration {
+                    elapsed = Duration::ZERO;
+                }
+            }
+            // Check if the node recovered
+            if self.failure_simulator.check_recovery().await {
+                info!("🚀 Node {} rejoining cluster after recovery", self.id);
+                self.sync_state_from_peers().await;
+                *self.last_heartbeat.write().await = Instant::now();
+                info!("✅ Node {} synchronized and READY", self.id);
+            }
+            // Skip election actions while failed
+            if self.failure_simulator.is_failed().await {
+                continue;
+            }
+            // Election timeout logic
             let last_heartbeat = *self.last_heartbeat.read().await;
             let state = self.state.read().await.clone();
-            
             if matches!(state, RaftState::Follower) {
                 if last_heartbeat.elapsed() > timeout_duration {
                     info!("Node {} election timeout, starting election", self.id);
                     self.start_election().await;
                 }
+            } else if matches!(state, RaftState::Candidate) {
+                // If candidate did not win, step down after timeout
+                info!("Node {}: Candidate timed out, stepping down to follower", self.id);
+                *self.state.write().await = RaftState::Follower;
+                *self.voted_for.write().await = None;
+                self.votes_received.write().await.clear();
             }
         }
     }
-    
+
     async fn start_election(&self) {
         info!("Node {} starting election", self.id);
-        
         *self.state.write().await = RaftState::Candidate;
         *self.current_term.write().await += 1;
         *self.voted_for.write().await = Some(self.id);
         *self.last_heartbeat.write().await = Instant::now();
-        
         let current_term = *self.current_term.read().await;
         let log = self.log.read().await;
         let last_log_index = log.len() as u64;
         let last_log_term = log.last().map(|entry| entry.term).unwrap_or(0);
-        
         let vote_request = RaftMessage::RequestVote {
             term: current_term,
             candidate_id: self.id,
             last_log_index,
             last_log_term,
         };
-        
+        // Reset votes for this term
+        let mut votes = self.votes_received.write().await;
+        votes.insert(current_term, HashMap::new());
+        votes.get_mut(&current_term).unwrap().insert(self.id, true); // vote for self
+        drop(votes);
         // Send vote requests to all peers
         for peer_id in &self.peers {
             self.send_message(*peer_id, vote_request.clone()).await;
         }
     }
     
-    async fn handle_vote_request(&self, term: u64, candidate_id: u32, _last_log_index: u64, _last_log_term: u64) -> RaftMessage {
+    async fn handle_vote_request(&self, term: u64, candidate_id: u32, last_log_index: u64, last_log_term: u64) -> RaftMessage {
         let mut current_term = self.current_term.write().await;
         let mut voted_for = self.voted_for.write().await;
-        
+        let log = self.log.read().await;
         if term > *current_term {
             *current_term = term;
             *voted_for = None;
             *self.state.write().await = RaftState::Follower;
         }
-        
-        let vote_granted = if term == *current_term {
+        let up_to_date = {
+            let last_index = log.len() as u64;
+            let last_term = log.last().map(|e| e.term).unwrap_or(0);
+            last_log_term > last_term || (last_log_term == last_term && last_log_index >= last_index)
+        };
+        let vote_granted = if term == *current_term && up_to_date {
             match *voted_for {
                 None => {
                     *voted_for = Some(candidate_id);
@@ -265,42 +304,50 @@ impl RaftNode {
         } else {
             false
         };
-        
         if vote_granted {
             info!("Node {} voted for candidate {}", self.id, candidate_id);
         }
-        
         RaftMessage::VoteReply {
             term: *current_term,
             vote_granted,
+            sender_id: self.id,
         }
     }
     
-    async fn handle_vote_reply(&self, term: u64, vote_granted: bool) {
+    async fn handle_vote_reply(&self, term: u64, vote_granted: bool, sender_id: u32) {
         let current_term = *self.current_term.read().await;
         let state = self.state.read().await.clone();
-        
         if term > current_term {
             *self.current_term.write().await = term;
             *self.voted_for.write().await = None;
             *self.state.write().await = RaftState::Follower;
             return;
         }
-        
-        if matches!(state, RaftState::Candidate) && term == current_term && vote_granted {
-            // Count votes (simplified - in real implementation, track individual votes)
-            self.become_leader().await;
+        if matches!(state, RaftState::Candidate) && term == current_term {
+            let mut votes = self.votes_received.write().await;
+            let entry = votes.entry(term).or_insert_with(HashMap::new);
+            // Track sender's vote
+            entry.insert(sender_id, vote_granted);
+            // Always count self
+            entry.insert(self.id, true);
+            let granted_votes = entry.values().filter(|&&v| v).count();
+            let total = self.peers.len() + 1;
+            info!("Node {}: term {} has {} granted votes out of {}", self.id, term, granted_votes, total);
+            if granted_votes > total / 2 && matches!(*self.state.read().await, RaftState::Candidate) {
+                self.become_leader().await;
+            }
         }
     }
-    
+
     async fn become_leader(&self) {
         let current_term = *self.current_term.read().await;
-        info!("Node {} became leader for term {}", self.id, current_term);
-        
-        *self.state.write().await = RaftState::Leader;
-        
-        // Send initial heartbeat
-        self.send_heartbeat().await;
+        // Only become leader if not already leader and term is highest
+        if !matches!(*self.state.read().await, RaftState::Leader) {
+            info!("Node {} became leader for term {}", self.id, current_term);
+            *self.state.write().await = RaftState::Leader;
+            // Send initial heartbeat
+            self.send_heartbeat().await;
+        }
     }
     
     async fn heartbeat_loop(&self) {
@@ -332,23 +379,50 @@ impl RaftNode {
         }
     }
     
-    async fn handle_append_entries(&self, term: u64, leader_id: u32, _prev_log_index: u64, _prev_log_term: u64, entries: Vec<LogEntry>, _leader_commit: u64) -> RaftMessage {
+    async fn handle_append_entries(&self, term: u64, leader_id: u32, prev_log_index: u64, prev_log_term: u64, entries: Vec<LogEntry>, leader_commit: u64) -> RaftMessage {
         let mut current_term = self.current_term.write().await;
-        
+        let mut log = self.log.write().await;
+        let mut commit_index = self.commit_index.write().await;
+        let mut last_applied = self.last_applied.write().await;
+        let mut success = false;
+        if term > *current_term {
+            *current_term = term;
+            *self.voted_for.write().await = None;
+            *self.state.write().await = RaftState::Follower;
+        }
         if term >= *current_term {
             *current_term = term;
             *self.voted_for.write().await = None;
             *self.state.write().await = RaftState::Follower;
             *self.last_heartbeat.write().await = Instant::now();
-            
-            if !entries.is_empty() {
-                info!("Node {} received {} log entries from leader {}", self.id, entries.len(), leader_id);
+            // Log consistency check
+            if prev_log_index == 0 || (log.len() as u64 >= prev_log_index && (prev_log_index == 0 || log.get((prev_log_index-1) as usize).map(|e| e.term) == Some(prev_log_term))) {
+                // Append new entries
+                for entry in &entries {
+                    if (entry.index as usize) < log.len() {
+                        log[entry.index as usize] = entry.clone();
+                    } else {
+                        log.push(entry.clone());
+                    }
+                }
+                // Update commit index
+                if leader_commit > *commit_index {
+                    *commit_index = std::cmp::min(leader_commit, log.len() as u64);
+                }
+                // Apply committed entries
+                while *last_applied < *commit_index {
+                    *last_applied += 1;
+                    // Apply log[*last_applied as usize - 1] if needed
+                }
+                success = true;
+                if !entries.is_empty() {
+                    info!("Node {} received {} log entries from leader {}", self.id, entries.len(), leader_id);
+                }
             }
         }
-        
         RaftMessage::AppendReply {
             term: *current_term,
-            success: term >= *current_term,
+            success,
         }
     }
     
@@ -413,19 +487,41 @@ impl RaftNode {
     }
 
     async fn sync_state_from_peers(&self) {
-    info!("Node {} syncing state from peers after recovery", self.id);
-        
-        // Find the current leader and sync from them
-        // In a real implementation, we'd request current state
-        // For now, we'll simulate receiving the latest term and clearing stale data
-        
-        // Clear any stale leadership claims
+        info!("Node {} syncing state from peers after recovery", self.id);
+        // Always step down to follower and clear leadership/candidate claim
         *self.state.write().await = RaftState::Follower;
         *self.voted_for.write().await = None;
-        
-        // Request current term from peers (simplified)
-        // In reality, this would be done via network requests
-        info!("Node {} cleared stale state and became follower", self.id);
+        self.votes_received.write().await.clear();
+        // Query peers for their current term and set ours to the highest
+        let mut highest_term = 0;
+        for peer_id in &self.peers {
+            if let Some(peer_term) = self.query_peer_term(*peer_id).await {
+                if peer_term > highest_term {
+                    highest_term = peer_term;
+                }
+            }
+        }
+        // Always set state to follower, even if term is not updated
+        let mut current_term = self.current_term.write().await;
+        if *current_term < highest_term {
+            *current_term = highest_term;
+        }
+        *self.state.write().await = RaftState::Follower;
+        *self.voted_for.write().await = None;
+        self.votes_received.write().await.clear();
+        info!("Node {} forcibly stepped down to follower for term {} after recovery", self.id, *current_term);
+        info!("Node {} synchronized term to {} after recovery", self.id, *current_term);
+    }
+
+    // Simulate querying a peer for its current term
+    async fn query_peer_term(&self, peer_id: u32) -> Option<u64> {
+        let registry = NODE_REGISTRY.lock().await;
+        for node in registry.iter() {
+            if node.id == peer_id {
+                return Some(*node.current_term.read().await);
+            }
+        }
+        None
     }
 
     pub async fn sync_discovery_service(&self, peer_users: HashMap<String, String>) {
@@ -455,6 +551,14 @@ async fn main() {
     let node2 = Arc::new(RaftNode::new(2, vec![1, 3]));
     let node3 = Arc::new(RaftNode::new(3, vec![1, 2]));
     
+    // Register nodes
+    {
+        let mut registry = NODE_REGISTRY.lock().await;
+        registry.push(node1.clone());
+        registry.push(node2.clone());
+        registry.push(node3.clone());
+    }
+
     // Create communication channels
     let (tx1, rx1) = mpsc::unbounded_channel();
     let (tx2, rx2) = mpsc::unbounded_channel();
