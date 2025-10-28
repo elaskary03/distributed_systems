@@ -144,28 +144,63 @@ impl NetNode {
                     sleep(Duration::from_secs(5)).await;
                 }
             }
+        };
 
+        // ✅ Start stdin input loop (moved here so it actually runs)
+        {
             let input_node = self.clone();
             tokio::spawn(async move {
                 use tokio::io::{self, AsyncBufReadExt};
                 let mut lines = io::BufReader::new(io::stdin()).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    // Only the leader should append new entries
                     if matches!(*input_node.state.read().await, RaftState::Leader) {
-                        // Build a new log entry
+                        // Build new log entry
                         let mut log = input_node.log.write().await;
                         let term = *input_node.current_term.read().await;
                         let index = (log.len() as u64) + 1;
                         log.push(LogEntry { term, index, command: line.clone() });
-                        drop(log); // release lock before sending RPCs
+                        drop(log);
 
                         info!("Node {}: appended new entry {}", input_node.id, line);
+
+                        // (Optional) Send immediately to peers instead of waiting for heartbeat
+                        let term = *input_node.current_term.read().await;
+                        let commit_index = *input_node.commit_index.read().await;
+                        let log = input_node.log.read().await;
+
+                        for (&peer_id, _) in input_node.peers.iter() {
+                            let next_index = {
+                                let next_indices = input_node.next_index.read().await;
+                                next_indices.get(&peer_id).copied().unwrap_or(1)
+                            };
+                            let (prev_log_index, prev_log_term) = NetNode::prev_ptr(next_index, &log);
+                            let start_idx = next_index.saturating_sub(1);
+                            let start_usize = usize::try_from(start_idx).unwrap_or(0);
+                            let entries = if start_usize > log.len() {
+                                Vec::new()
+                            } else {
+                                log[start_usize..].to_vec()
+                            };
+
+                            let msg = RaftMessage::AppendEntries {
+                                term,
+                                leader_id: input_node.id,
+                                prev_log_index,
+                                prev_log_term,
+                                entries,
+                                leader_commit: commit_index,
+                            };
+                            input_node.send_message(peer_id, msg).await;
+                        }
                     } else {
-                        info!("Node {}: not leader; ignoring local command '{}'", input_node.id, line);
+                        info!(
+                            "Node {}: not leader; ignoring local command '{}'",
+                            input_node.id, line
+                        );
                     }
                 }
             });
-        };
+        }
 
         // Spawn accept loop with error handling
         let node = self.clone();
@@ -195,22 +230,32 @@ impl NetNode {
             tokio::spawn(async move {
                 let mut backoff = Duration::from_secs(1);
                 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-                
+
                 loop {
-                    info!("Node {} attempting to connect to peer {} at {}", node.id, peer_id, addr);
+                    info!(
+                        "Node {} attempting to connect to peer {} at {}",
+                        node.id, peer_id, addr
+                    );
                     match TcpStream::connect(addr).await {
                         Ok(stream) => {
-                            info!("Node {} connected to peer {} at {}", node.id, peer_id, addr);
-                            backoff = Duration::from_secs(1); // Reset backoff on successful connection
+                            info!(
+                                "Node {} connected to peer {} at {}",
+                                node.id, peer_id, addr
+                            );
+                            backoff = Duration::from_secs(1);
                             if let Err(e) = node.handle_outbound(peer_id, stream).await {
-                                error!("Outbound connection {} -> {} failed: {}", node.id, peer_id, e);
+                                error!(
+                                    "Outbound connection {} -> {} failed: {}",
+                                    node.id, peer_id, e
+                                );
                             }
                         }
                         Err(e) => {
-                            error!("Connect to peer {} at {} failed: {}. Retrying in {:?}...", 
-                                  peer_id, addr, e, backoff);
+                            error!(
+                                "Connect to peer {} at {} failed: {}. Retrying in {:?}...",
+                                peer_id, addr, e, backoff
+                            );
                             sleep(backoff).await;
-                            // Exponential backoff with max limit
                             backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
                         }
                     }
@@ -221,9 +266,10 @@ impl NetNode {
         // Start election timer and raft logic loops
         let tnode = self.clone();
         tokio::spawn(async move { tnode.election_loop().await });
-    // Start heartbeat loop
-    let hnode = self.clone();
-    tokio::spawn(async move { hnode.heartbeat_loop().await });
+
+        // Start heartbeat loop
+        let hnode = self.clone();
+        tokio::spawn(async move { hnode.heartbeat_loop().await });
 
         Ok(())
     }
