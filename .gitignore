@@ -1,1 +1,8 @@
-distributed_systems/cloud_p2p_raft/target/debug
+# Rust build artifacts
+**/target/
+
+# Logs from your test runs
+**/logs/
+
+# macOS junk
+.DS_Store
