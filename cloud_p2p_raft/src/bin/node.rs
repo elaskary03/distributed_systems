@@ -144,6 +144,27 @@ impl NetNode {
                     sleep(Duration::from_secs(5)).await;
                 }
             }
+
+            let input_node = self.clone();
+            tokio::spawn(async move {
+                use tokio::io::{self, AsyncBufReadExt};
+                let mut lines = io::BufReader::new(io::stdin()).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    // Only the leader should append new entries
+                    if matches!(*input_node.state.read().await, RaftState::Leader) {
+                        // Build a new log entry
+                        let mut log = input_node.log.write().await;
+                        let term = *input_node.current_term.read().await;
+                        let index = (log.len() as u64) + 1;
+                        log.push(LogEntry { term, index, command: line.clone() });
+                        drop(log); // release lock before sending RPCs
+
+                        info!("Node {}: appended new entry {}", input_node.id, line);
+                    } else {
+                        info!("Node {}: not leader; ignoring local command '{}'", input_node.id, line);
+                    }
+                }
+            });
         };
 
         // Spawn accept loop with error handling
