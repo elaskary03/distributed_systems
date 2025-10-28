@@ -9,7 +9,8 @@ use tokio::time::{sleep, Duration, Instant};
 use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
-use tracing::{debug, info};
+use tracing::{debug, info, error};
+
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -337,7 +338,7 @@ impl NetNode {
                 
                 // Send reply
                 let reply = RaftMessage::AppendReply {
-                    term: current_term,
+                    term: *self.current_term.read().await,
                     sender_id: self.id,
                     success,
                 };
@@ -404,56 +405,57 @@ impl NetNode {
     }
 
     async fn election_loop(&self) {
-        loop {
-            // Election timeout: 2-4 seconds (adjusted for distributed operation)
-            let timeout = Duration::from_millis(2000 + rand::random::<u64>() % 2000);
-            let state = self.state.read().await;
-            
-            match *state {
-                RaftState::Leader => {
-                    // Leaders don't participate in elections
-                    sleep(Duration::from_millis(500)).await;
-                    continue;
-                },
-                RaftState::Candidate => {
-                    // If we're already a candidate, wait for votes
+    loop {
+        // 2–4s timeout
+        let timeout = Duration::from_millis(2000 + rand::random::<u64>() % 2000);
+
+        match *self.state.read().await {
+            RaftState::Leader => {
+                sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            RaftState::Candidate => {
+                sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            RaftState::Follower => {
+                let last = *self.last_heartbeat.read().await;
+                if last.elapsed() < timeout {
                     sleep(Duration::from_millis(100)).await;
                     continue;
-                },
-                RaftState::Follower => {
-                    let last = *self.last_heartbeat.read().await;
-                    let elapsed = last.elapsed();
-                    
-                    if elapsed < timeout {
-                        // Still within timeout, keep waiting
-                        sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                    
-                    // Timeout expired, start election
-                    info!("Node {} election timeout after {:?}, starting election", self.id, elapsed);
                 }
-            }
-            
-            if self.failure_simulated().await { continue; }
-                *self.state.write().await = RaftState::Candidate;
-                *self.current_term.write().await += 1;
-                *self.voted_for.write().await = Some(self.id);
-                let term = *self.current_term.read().await;
-                info!("Node {} starting election for term {}", self.id, term);
-                // reset and record self vote
-                {
-                    let mut votes = self.votes_received.write().await;
-                    votes.insert(term, HashMap::new());
-                    votes.get_mut(&term).unwrap().insert(self.id, true);
-                }
-                let req = RaftMessage::RequestVote { term, candidate_id: self.id, last_log_index: 0, last_log_term: 0 };
-                for (&peer_id, _) in self.peers.iter() {
-                    self.send_message(peer_id, req.clone()).await;
-                }
+                info!("Node {} election timeout after {:?}, starting election", self.id, last.elapsed());
             }
         }
+
+        if self.failure_simulated().await {
+            continue;
+        }
+
+        *self.state.write().await = RaftState::Candidate;
+        *self.current_term.write().await += 1;
+        *self.voted_for.write().await = Some(self.id);
+        let term = *self.current_term.read().await;
+        info!("Node {} starting election for term {}", self.id, term);
+
+        // reset & self vote
+        {
+            let mut votes = self.votes_received.write().await;
+            votes.insert(term, HashMap::new());
+            votes.get_mut(&term).unwrap().insert(self.id, true);
+        }
+
+        let req = RaftMessage::RequestVote {
+            term,
+            candidate_id: self.id,
+            last_log_index: 0,
+            last_log_term: 0,
+        };
+        for (&peer_id, _) in self.peers.iter() {
+            self.send_message(peer_id, req.clone()).await;
+        }
     }
+}
 
     async fn failure_simulated(&self) -> bool {
         false
@@ -486,50 +488,50 @@ impl NetNode {
             if !matches!(*self.state.read().await, RaftState::Leader) {
                 continue;
             }
-                let term = *self.current_term.read().await;
-                let commit_index = *self.commit_index.read().await;
-                let log = self.log.read().await;
+            let term = *self.current_term.read().await;
+            let commit_index = *self.commit_index.read().await;
+            let log = self.log.read().await;
+            
+            // Apply any newly committed entries
+            self.apply_committed_entries().await;
+            
+            for (&peer_id, _) in self.peers.iter() {
+                let next_index = {
+                    let next_indices = self.next_index.read().await;
+                    next_indices.get(&peer_id).copied().unwrap_or(1)
+                };
                 
-                // Apply any newly committed entries
-                self.apply_committed_entries().await;
+                // Prepare entries to send
+                let prev_log_index = next_index - 1;
+                let prev_log_term = if prev_log_index == 0 {
+                    0
+                } else {
+                    log.get(prev_log_index as usize - 1)
+                        .map(|entry| entry.term)
+                        .unwrap_or(0)
+                };
                 
-                for (&peer_id, _) in self.peers.iter() {
-                    let next_index = {
-                        let next_indices = self.next_index.read().await;
-                        next_indices.get(&peer_id).copied().unwrap_or(1)
-                    };
-                    
-                    // Prepare entries to send
-                    let prev_log_index = next_index - 1;
-                    let prev_log_term = if prev_log_index == 0 {
-                        0
-                    } else {
-                        log.get(prev_log_index as usize - 1)
-                            .map(|entry| entry.term)
-                            .unwrap_or(0)
-                    };
-                    
-                    // Get entries starting from next_index
-                    let entries: Vec<LogEntry> = if next_index > 0 && next_index <= log.len() as u64 {
-                        log[(next_index - 1) as usize..].to_vec()
-                    } else {
-                        Vec::new()
-                    };
-                    
-                    // Send AppendEntries RPC
-                    let msg = RaftMessage::AppendEntries {
-                        term,
-                        leader_id: self.id,
-                        prev_log_index,
-                        prev_log_term,
-                        entries,
-                        leader_commit: commit_index,
-                    };
-                    self.send_message(peer_id, msg).await;
-                }
+                // Get entries starting from next_index
+                let entries: Vec<LogEntry> = if next_index > 0 && next_index <= log.len() as u64 {
+                    log[(next_index - 1) as usize..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                
+                // Send AppendEntries RPC
+                let msg = RaftMessage::AppendEntries {
+                    term,
+                    leader_id: self.id,
+                    prev_log_index,
+                    prev_log_term,
+                    entries,
+                    leader_commit: commit_index,
+                };
+                self.send_message(peer_id, msg).await;
             }
         }
     }
+    
     
     // Helper function to update indices after successful AppendEntries
     async fn update_indices(&self, peer_id: u32, last_index: u64) {
