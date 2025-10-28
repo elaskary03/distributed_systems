@@ -115,6 +115,22 @@ impl NetNode {
         }
     }
 
+    #[inline]
+    fn clamp1(n: u64) -> u64 {
+        if n == 0 { 1 } else { n }
+    }
+
+    #[inline]
+    fn prev_ptr(next_index: u64, log: &[LogEntry]) -> (u64, u64) {
+        let prev_log_index = next_index.saturating_sub(1); // never underflow
+        let prev_log_term = if prev_log_index == 0 {
+            0
+        } else {
+            log.get(prev_log_index as usize - 1).map(|e| e.term).unwrap_or(0)
+        };
+        (prev_log_index, prev_log_term)
+    }
+
     async fn start(self: Arc<Self>, listen_addr: SocketAddr) -> anyhow::Result<()> {
         // Start listener with retry
         let listener = loop {
@@ -213,12 +229,24 @@ impl NetNode {
             out.insert(peer_id, tx.clone());
         }
 
-        while let Some(msg) = rx.recv().await {
-            let payload = serde_json::to_vec(&msg)?;
-            writer.send(Bytes::from(payload)).await?;
+        let result = async {
+            while let Some(msg) = rx.recv().await {
+                let payload = serde_json::to_vec(&msg)?;
+                if let Err(e) = writer.send(Bytes::from(payload)).await {
+                    // propagate so we can clean up and reconnect
+                    return Err::<(), anyhow::Error>(e.into());
+                }
+            }
+            Ok(())
+        }.await;
+
+        // ensure we drop the sender for this peer on any exit path
+        {
+            let mut out = self.outbound.lock().await;
+            out.remove(&peer_id);
         }
 
-        Ok(())
+        result
     }
 
     async fn send_message(&self, target: u32, msg: RaftMessage) {
@@ -363,7 +391,7 @@ impl NetNode {
                     } else {
                         let mut next_indices = self.next_index.write().await;
                         if let Some(next_idx) = next_indices.get_mut(&sender_id) {
-                            *next_idx = (*next_idx).saturating_sub(1);
+                            *next_idx = Self::clamp1(next_idx.saturating_sub(1)); // clamp to ≥1
                             info!("Node {} decreased next_index for {} to {}", self.id, sender_id, *next_idx);
                         }
                     }
@@ -372,9 +400,9 @@ impl NetNode {
         }
     }
 
-    async fn handle_vote_request(&self, term: u64, candidate_id: u32) {
+    // async fn handle_vote_request(&self, term: u64, candidate_id: u32) {
 
-    }
+    // }
 
     async fn handle_vote_reply(&self, term: u64, vote_granted: bool, _sender_id: u32) {
         let current_term = *self.current_term.read().await;
@@ -392,15 +420,34 @@ impl NetNode {
             let granted_votes = entry.values().filter(|&&v| v).count();
             let total = self.peers.len() + 1;
             info!("Node {}: term {} has {} granted votes out of {}", self.id, term, granted_votes, total);
-            if granted_votes > total / 2 && matches!(*self.state.read().await, RaftState::Candidate) {
-                *self.state.write().await = RaftState::Leader;
-                info!("Node {} became leader for term {}", self.id, current_term);
-                // send initial heartbeat
+        if granted_votes > total / 2 && matches!(*self.state.read().await, RaftState::Candidate) {
+            *self.state.write().await = RaftState::Leader;
+            info!("Node {} became leader for term {}", self.id, current_term);
+
+            // Properly initialize replication state (Raft §5.2)
+            let last_index = self.log.read().await.len() as u64;
+            {
+                let mut next_indices = self.next_index.write().await;
+                let mut match_indices = self.match_index.write().await;
                 for (&peer_id, _) in self.peers.iter() {
-                    let hb = RaftMessage::AppendEntries { term: current_term, leader_id: self.id, prev_log_index: 0, prev_log_term: 0, entries: vec![], leader_commit: 0 };
-                    self.send_message(peer_id, hb).await;
+                    next_indices.insert(peer_id, last_index + 1); // 1-based, points to "next to send"
+                    match_indices.insert(peer_id, 0);
                 }
             }
+
+            // send initial heartbeat
+            for (&peer_id, _) in self.peers.iter() {
+                let hb = RaftMessage::AppendEntries {
+                    term: current_term,
+                    leader_id: self.id,
+                    prev_log_index: 0,
+                    prev_log_term: 0,
+                    entries: vec![],
+                    leader_commit: 0
+                };
+                self.send_message(peer_id, hb).await;
+            }
+        }
         }
     }
 
@@ -445,12 +492,20 @@ impl NetNode {
             votes.get_mut(&term).unwrap().insert(self.id, true);
         }
 
+        let (last_log_index, last_log_term) = {
+            let lg = self.log.read().await;
+            let idx = lg.len() as u64;
+            let term_of_last = lg.last().map_or(0, |e| e.term);
+            (idx, term_of_last)
+        };
+
         let req = RaftMessage::RequestVote {
             term,
             candidate_id: self.id,
-            last_log_index: 0,
-            last_log_term: 0,
+            last_log_index,
+            last_log_term,
         };
+
         for (&peer_id, _) in self.peers.iter() {
             self.send_message(peer_id, req.clone()).await;
         }
@@ -502,20 +557,15 @@ impl NetNode {
                 };
                 
                 // Prepare entries to send
-                let prev_log_index = next_index - 1;
-                let prev_log_term = if prev_log_index == 0 {
-                    0
-                } else {
-                    log.get(prev_log_index as usize - 1)
-                        .map(|entry| entry.term)
-                        .unwrap_or(0)
-                };
+                let (prev_log_index, prev_log_term) = Self::prev_ptr(next_index, &log);
                 
-                // Get entries starting from next_index
-                let entries: Vec<LogEntry> = if next_index > 0 && next_index <= log.len() as u64 {
-                    log[(next_index - 1) as usize..].to_vec()
-                } else {
+                // Get entries starting from next_index (avoid underflow)
+                let start_idx = next_index.saturating_sub(1);            // u64
+                let start_usize = usize::try_from(start_idx).unwrap_or(0);
+                let entries: Vec<LogEntry> = if next_index == 0 || start_usize > log.len() {
                     Vec::new()
+                } else {
+                    log[start_usize..].to_vec()
                 };
                 
                 // Send AppendEntries RPC
@@ -534,26 +584,47 @@ impl NetNode {
     
     
     // Helper function to update indices after successful AppendEntries
-    async fn update_indices(&self, peer_id: u32, last_index: u64) {
-        let mut next_indices = self.next_index.write().await;
-        let mut match_indices = self.match_index.write().await;
-        
-        next_indices.insert(peer_id, last_index + 1);
-        match_indices.insert(peer_id, last_index);
-        
-        // Update commit index if possible
-        let match_indices = match_indices.clone();
-        let mut sorted_indices: Vec<u64> = match_indices.values().copied().collect();
-        sorted_indices.sort_unstable();
-        
-        if let Some(median_index) = sorted_indices.get(sorted_indices.len() / 2) {
+    async fn update_indices(&self, peer_id: u32, acked_index: u64) {
+        // Update follower's indices
+        {
+            let mut next_indices = self.next_index.write().await;
+            let mut match_indices = self.match_index.write().await;
+            match_indices.insert(peer_id, acked_index);
+            next_indices.insert(peer_id, acked_index.saturating_add(1));
+        }
+
+        // Build the set of "match" indexes including the leader's own last index
+        let mut acks: Vec<u64> = {
+            let match_indices = self.match_index.read().await;
+            match_indices.values().copied().collect()
+        };
+        let leader_last = self.log.read().await.len() as u64;
+        acks.push(leader_last); // include leader
+
+        if acks.is_empty() {
+            return;
+        }
+
+        acks.sort_unstable();
+        let majority_idx = acks[acks.len() / 2];
+
+        // Nothing to commit yet
+        if majority_idx == 0 {
+            return;
+        }
+
+        // Only commit entries from the current term (Raft §5.4.2)
+        let entry_term = {
             let log = self.log.read().await;
-            if let Some(entry) = log.get(*median_index as usize - 1) {
-                if entry.term == *self.current_term.read().await {
-                    let mut commit_index = self.commit_index.write().await;
-                    if *median_index > *commit_index {
-                        *commit_index = *median_index;
-                    }
+            log.get((majority_idx - 1) as usize).map(|e| e.term)
+        };
+
+        if let Some(term) = entry_term {
+            let current_term = *self.current_term.read().await;
+            if term == current_term {
+                let mut commit_index = self.commit_index.write().await;
+                if majority_idx > *commit_index {
+                    *commit_index = majority_idx;
                 }
             }
         }
