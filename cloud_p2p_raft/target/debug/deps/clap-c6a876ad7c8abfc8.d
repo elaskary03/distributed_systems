@@ -1,0 +1,9 @@
+/Users/abdelrahmanelaskary/Desktop/fall 2025/distributed systems/distributed system systems project/distributed_systems/cloud_p2p_raft/target/debug/deps/clap-c6a876ad7c8abfc8.d: /Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/lib.rs /Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/../examples/demo.rs /Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/../examples/demo.md
+
+/Users/abdelrahmanelaskary/Desktop/fall 2025/distributed systems/distributed system systems project/distributed_systems/cloud_p2p_raft/target/debug/deps/libclap-c6a876ad7c8abfc8.rlib: /Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/lib.rs /Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/../examples/demo.rs /Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/../examples/demo.md
+
+/Users/abdelrahmanelaskary/Desktop/fall 2025/distributed systems/distributed system systems project/distributed_systems/cloud_p2p_raft/target/debug/deps/libclap-c6a876ad7c8abfc8.rmeta: /Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/lib.rs /Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/../examples/demo.rs /Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/../examples/demo.md
+
+/Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/lib.rs:
+/Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/../examples/demo.rs:
+/Users/abdelrahmanelaskary/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.50/src/../examples/demo.md:
