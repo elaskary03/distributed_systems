@@ -10,7 +10,7 @@ use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
 use tracing::{debug, info, error};
-
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -24,6 +24,9 @@ struct Args {
     /// Peers list: comma separated id=addr (e.g. "2=192.168.1.101:7002,3=192.168.1.102:7003")
     #[arg(long)]
     peers: String,
+    /// Client API listen address (e.g. "0.0.0.0:9001")
+    #[arg(long, default_value = "127.0.0.1:9000")]
+    client_addr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,6 +71,28 @@ pub enum RaftMessage {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum ClientRequest {
+    /// { "type": "Submit", "command": "your string command" }
+    Submit { command: String },
+    /// { "type": "GetLeader" }
+    GetLeader,
+    /// { "type": "GetState" }
+    GetState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum ClientResponse {
+    Ok,
+    NotLeader { leader_id: Option<u32> },
+    Leader { id: u32 },
+    State { role: String, term: u64, commit_index: u64 },
+    Error { message: String },
+}
+
+
 #[derive(Clone)]
 struct NetNode {
     id: u32,
@@ -83,6 +108,8 @@ struct NetNode {
     last_applied: Arc<RwLock<u64>>,
     next_index: Arc<RwLock<HashMap<u32, u64>>>,
     match_index: Arc<RwLock<HashMap<u32, u64>>>,
+    // Hint for who is leader (updated when we receive AppendEntries)
+    leader_hint: Arc<RwLock<Option<u32>>>,
 }
 
 impl NetNode {
@@ -112,6 +139,7 @@ impl NetNode {
             last_applied: Arc::new(RwLock::new(0)),
             next_index: Arc::new(RwLock::new(next_index)),
             match_index: Arc::new(RwLock::new(match_index)),
+            leader_hint: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -271,6 +299,17 @@ impl NetNode {
         let hnode = self.clone();
         tokio::spawn(async move { hnode.heartbeat_loop().await });
 
+        // Start client API listener on a port (9000 + node id)
+        let client_node = self.clone();
+        tokio::spawn(async move {
+            let client_addr: std::net::SocketAddr = format!("127.0.0.1:{}", 9000 + client_node.id)
+                .parse()
+                .expect("parse client addr");
+            if let Err(e) = client_node.run_client_api(client_addr).await {
+                error!("client API failed: {:?}", e);
+            }
+        });
+
         Ok(())
     }
 
@@ -382,6 +421,11 @@ impl NetNode {
             RaftMessage::AppendEntries { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit } => {
                 info!("Node {} received AppendEntries from {} (term {}, {} entries)", 
                      self.id, leader_id, term, entries.len());
+
+                {
+                    let mut hint = self.leader_hint.write().await;
+                    *hint = Some(leader_id);
+                }
                 
                 let current_term = *self.current_term.read().await;
                 let mut success = false;
@@ -694,6 +738,163 @@ impl NetNode {
                     *commit_index = majority_idx;
                 }
             }
+        }
+    }
+
+    // Client API: a simple TCP line protocol for issuing commands
+    // ================================================================
+    pub async fn run_client_api(self: Arc<Self>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+        let listener = TcpListener::bind(addr).await?;
+        info!("🌐 Node {} client API listening on {}", self.id, addr);
+
+        loop {
+            let (stream, peer_addr) = listener.accept().await?;
+            info!("📡 Node {} accepted client connection from {}", self.id, peer_addr);
+            let node = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = node.handle_client_connection(stream).await {
+                    error!("client connection error: {:?}", e);
+                }
+            });
+        }
+    }
+
+    async fn handle_client_connection(&self, mut stream: TcpStream) -> anyhow::Result<()> {
+        let (r, mut w) = stream.split();
+        let mut reader = BufReader::new(r);
+        let mut line = String::new();
+
+        w.write_all(b"Welcome to Cloud P2P Node API!\n").await?;
+        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST\n").await?;
+
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).await?;
+            if n == 0 {
+                break;
+            }
+            let cmd = line.trim();
+            let is_leader = matches!(*self.state.read().await, RaftState::Leader);
+            let mut parts = cmd.split_whitespace();
+
+            match parts.next() {
+                Some("LEADER") => {
+                    if is_leader {
+                        w.write_all(format!("LEADER {}\n", self.id).as_bytes()).await?;
+                    } else {
+                        w.write_all(b"NOT_LEADER\n").await?;
+                    }
+                }
+
+                Some("REGISTER") => {
+                    if !is_leader {
+                        w.write_all(b"NOT_LEADER\n").await?;
+                        continue;
+                    }
+                    let user = match parts.next() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            w.write_all(b"Usage: REGISTER <user> <ip>\n").await?;
+                            continue;
+                        }
+                    };
+                    let ip = match parts.next() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            w.write_all(b"Usage: REGISTER <user> <ip>\n").await?;
+                            continue;
+                        }
+                    };
+
+                    let command = format!("REGISTER {} {}", user, ip);
+                    self.append_and_replicate(command).await;
+                    w.write_all(b"OK\n").await?;
+                }
+
+                Some("UNREGISTER") => {
+                    if !is_leader {
+                        w.write_all(b"NOT_LEADER\n").await?;
+                        continue;
+                    }
+                    let user = match parts.next() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            w.write_all(b"Usage: UNREGISTER <user>\n").await?;
+                            continue;
+                        }
+                    };
+                    let command = format!("UNREGISTER {}", user);
+                    self.append_and_replicate(command).await;
+                    w.write_all(b"OK\n").await?;
+                }
+
+                Some("LIST") => {
+                    let log = self.log.read().await;
+                    if log.is_empty() {
+                        w.write_all(b"(empty)\n").await?;
+                    } else {
+                        for e in log.iter() {
+                            let s = format!("idx={} term={} cmd={}\n", e.index, e.term, e.command);
+                            w.write_all(s.as_bytes()).await?;
+                        }
+                    }
+                }
+
+                Some(unknown) => {
+                    let s = format!("ERR unknown command: {}\n", unknown);
+                    w.write_all(s.as_bytes()).await?;
+                }
+
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    // Append a command to this leader's log and replicate to peers
+    async fn append_and_replicate(&self, command: String) {
+        if !matches!(*self.state.read().await, RaftState::Leader) {
+            info!("Node {}: append ignored (not leader)", self.id);
+            return;
+        }
+
+        let term = *self.current_term.read().await;
+        let index = {
+            let mut log = self.log.write().await;
+            let index = (log.len() as u64) + 1;
+            log.push(LogEntry { term, index, command: command.clone() });
+            index
+        };
+        info!("Node {}: appended new entry #{} '{}'", self.id, index, command);
+
+        let term_now = *self.current_term.read().await;
+        let commit_index = *self.commit_index.read().await;
+        let log_snapshot = self.log.read().await;
+
+        for (&peer_id, _) in self.peers.iter() {
+            let next_index = {
+                let next_indices = self.next_index.read().await;
+                next_indices.get(&peer_id).copied().unwrap_or(1)
+            };
+
+            let (prev_log_index, prev_log_term) = Self::prev_ptr(next_index, &log_snapshot);
+            let start_idx = next_index.saturating_sub(1);
+            let start_usize = usize::try_from(start_idx).unwrap_or(0);
+            let entries = if start_usize > log_snapshot.len() {
+                Vec::new()
+            } else {
+                log_snapshot[start_usize..].to_vec()
+            };
+
+            let msg = RaftMessage::AppendEntries {
+                term: term_now,
+                leader_id: self.id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit: commit_index,
+            };
+            self.send_message(peer_id, msg).await;
         }
     }
 }
