@@ -16,3 +16,15 @@ bytes = "1.4"
 clap = { version = "4.3", features = ["derive"] }
 anyhow = "1.0"
 futures = "0.3"
+axum = "0.7"
+hyper = "1"
+tower = "0.5"
+thiserror = "1"
+
+[[bin]]
+name = "gui"
+path = "src/gui.rs"
+
+[[bin]]
+name = "proxy"
+path = "src/bin/proxy.rs"

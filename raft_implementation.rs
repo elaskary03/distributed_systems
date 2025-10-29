@@ -105,10 +105,11 @@ impl RaftNode {
         }
     }
     
-    async fn election_timeout_loop(&self) {
-        loop {
-            let timeout_duration = Duration::from_millis(150 + rand::random::<u64>() % 150);
-            tokio::time::sleep(timeout_duration).await;
+        async fn election_timeout_loop(&self) {
+            loop {
+                // Randomize between 1500ms and 3000ms to reduce split votes
+                let timeout_duration = Duration::from_millis(1500 + rand::random::<u64>() % 1500);
+                tokio::time::sleep(timeout_duration).await;
             
             let last_heartbeat = *self.last_heartbeat.read().await;
             let state = self.state.read().await.clone();

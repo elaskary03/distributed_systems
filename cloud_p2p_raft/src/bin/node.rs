@@ -330,6 +330,35 @@ impl NetNode {
             });
         }
 
+        // Periodically check for missing outbound connections
+        let reconnect_node = self.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_secs(5)).await; // every 5 seconds
+                let current_outbound = reconnect_node.outbound.lock().await;
+                let connected: Vec<u32> = current_outbound.keys().cloned().collect();
+                drop(current_outbound);
+
+                for (&peer_id, &addr) in reconnect_node.peers.iter() {
+                    if connected.contains(&peer_id) {
+                        continue;
+                    }
+
+                    info!("Node {} detected missing connection to {}, retrying...", reconnect_node.id, peer_id);
+                    let node_clone = reconnect_node.clone();
+                    tokio::spawn(async move {
+                        if let Ok(stream) = TcpStream::connect(addr).await {
+                            info!("Node {} reconnected to {}", node_clone.id, peer_id);
+                            if let Err(e) = node_clone.handle_outbound(peer_id, stream).await {
+                                error!("Reconnection to {} failed: {}", peer_id, e);
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+
         // Start election timer and raft logic loops
         let tnode = self.clone();
         tokio::spawn(async move { tnode.election_loop().await });
@@ -615,7 +644,7 @@ impl NetNode {
     }
 
     async fn election_loop(&self) {
-    loop {
+        loop {
         // 2–4s timeout
         let timeout = Duration::from_millis(2000 + rand::random::<u64>() % 2000);
 
@@ -624,17 +653,16 @@ impl NetNode {
                 sleep(Duration::from_millis(500)).await;
                 continue;
             }
-            RaftState::Candidate => {
-                sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-            RaftState::Follower => {
+            RaftState::Candidate | RaftState::Follower => {
                 let last = *self.last_heartbeat.read().await;
                 if last.elapsed() < timeout {
                     sleep(Duration::from_millis(100)).await;
                     continue;
                 }
-                info!("Node {} election timeout after {:?}, starting election", self.id, last.elapsed());
+                info!(
+                    "Node {} election timeout after {:?}, starting election",
+                    self.id, last.elapsed()
+                );
             }
         }
 
@@ -645,6 +673,7 @@ impl NetNode {
         *self.state.write().await = RaftState::Candidate;
         *self.current_term.write().await += 1;
         *self.voted_for.write().await = Some(self.id);
+        *self.last_heartbeat.write().await = Instant::now();
         let term = *self.current_term.read().await;
         info!("Node {} starting election for term {}", self.id, term);
 
@@ -773,48 +802,42 @@ impl NetNode {
     }
     
     
-    // Helper function to update indices after successful AppendEntries
     async fn update_indices(&self, peer_id: u32, acked_index: u64) {
-        // Update follower's indices
+        // 1️⃣ Update follower’s replication state
         {
             let mut next_indices = self.next_index.write().await;
             let mut match_indices = self.match_index.write().await;
             match_indices.insert(peer_id, acked_index);
-            next_indices.insert(peer_id, acked_index.saturating_add(1));
+            next_indices.insert(peer_id, acked_index + 1);
         }
 
-        // Build the set of "match" indexes including the leader's own last index
-        let mut acks: Vec<u64> = {
-            let match_indices = self.match_index.read().await;
-            match_indices.values().copied().collect()
+        // 2️⃣ Compute possible majority commit index
+        let mut all_matches: Vec<u64> = {
+            let m = self.match_index.read().await;
+            m.values().copied().collect()
         };
         let leader_last = self.log.read().await.len() as u64;
-        acks.push(leader_last); // include leader
+        all_matches.push(leader_last); // include leader
+        all_matches.sort_unstable();
 
-        if acks.is_empty() {
-            return;
-        }
-
-        acks.sort_unstable();
-        let majority_idx = acks[acks.len() / 2];
-
-        // Nothing to commit yet
+        let majority_idx = all_matches[all_matches.len() / 2];
         if majority_idx == 0 {
             return;
         }
 
-        // Only commit entries from the current term (Raft §5.4.2)
+        // 3️⃣ Commit only entries from current term (Raft §5.4.2)
         let entry_term = {
             let log = self.log.read().await;
             log.get((majority_idx - 1) as usize).map(|e| e.term)
         };
 
-        if let Some(term) = entry_term {
+        if let Some(t) = entry_term {
             let current_term = *self.current_term.read().await;
-            if term == current_term {
+            if t == current_term {
                 let mut commit_index = self.commit_index.write().await;
                 if majority_idx > *commit_index {
                     *commit_index = majority_idx;
+                    println!("🟢 Node {} advanced commit_index to {}", self.id, majority_idx);
                 }
             }
         }
@@ -860,6 +883,9 @@ impl NetNode {
                 Some("LEADER") => {
                     if is_leader {
                         w.write_all(format!("LEADER {}\n", self.id).as_bytes()).await?;
+                    } else if let Some(lid) = *self.leader_hint.read().await {
+                        let addr = NetNode::client_addr_for(lid);
+                        w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
                     } else {
                         w.write_all(b"NOT_LEADER\n").await?;
                     }
