@@ -46,6 +46,64 @@ impl RaftNode {
             log_applier.apply_log_entries().await;
         });
     }
+
+    pub async fn apply_log_entries(&self) {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let commit_index = *self.commit_index.read().await;
+            let mut last_applied = self.last_applied.write().await;
+
+            while *last_applied < commit_index {
+                *last_applied += 1;
+                let entry = {
+                    let log = self.log.read().await;
+                    log.get((*last_applied - 1) as usize).cloned()
+                };
+
+                if let Some(e) = entry {
+                    self.apply_log_entry(e).await;
+                }
+            }
+        }
+    }
+
+    pub async fn apply_log_entry(&self, entry: LogEntry) {
+        match entry.command {
+            Command::RegisterUser { user_id, ip } => {
+                self.discovery_service.write().await.registered_users.insert(
+                    user_id.clone(),
+                    UserInfo {
+                        user_id,
+                        ip,
+                        last_seen: Instant::now(),
+                    },
+                );
+                println!("✅ Node {} applied RegisterUser", self.id);
+            }
+            Command::UnregisterUser { user_id } => {
+                self.discovery_service
+                    .write()
+                    .await
+                    .registered_users
+                    .remove(&user_id);
+                println!("❌ Node {} applied UnregisterUser", self.id);
+            }
+            Command::UpdateLoadBalancing { server_id, load } => {
+                self.load_balancer
+                    .write()
+                    .await
+                    .server_loads
+                    .insert(server_id, load);
+            }
+            Command::EncryptImage { image_id, metadata } => {
+                println!(
+                    "🖼️ Node {} applied EncryptImage {} metadata={}",
+                    self.id, image_id, metadata
+                );
+            }
+        }
+    }
     
     async fn election_timeout_loop(&self) {
         loop {
@@ -186,6 +244,19 @@ impl RaftNode {
                     let new_match_index = prev_log_index + entries.len() as u64;
                     self.next_index.write().await.insert(*peer_id, new_match_index + 1);
                     self.match_index.write().await.insert(*peer_id, new_match_index);
+
+                    // 🔥 Try to advance commit_index if majority replicated
+                    let mut match_indexes: Vec<u64> = self.match_index.read().await.values().cloned().collect();
+                    match_indexes.push(self.log.read().await.len() as u64);
+                    match_indexes.sort_unstable();
+                    let majority_pos = match_indexes.len() / 2;
+                    let new_commit = match_indexes[majority_pos];
+
+                    let current_commit = *self.commit_index.read().await;
+                    if new_commit > current_commit {
+                        *self.commit_index.write().await = new_commit;
+                        println!("🔥 Node {} committed up to index {}", self.id, new_commit);
+                    }
                 } else {
                     // Decrement next_index and retry
                     let next_index = self.next_index.read().await.get(peer_id).copied().unwrap_or(1);

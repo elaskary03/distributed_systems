@@ -110,6 +110,7 @@ struct NetNode {
     match_index: Arc<RwLock<HashMap<u32, u64>>>,
     // Hint for who is leader (updated when we receive AppendEntries)
     leader_hint: Arc<RwLock<Option<u32>>>,
+    registered_users: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl NetNode {
@@ -140,6 +141,7 @@ impl NetNode {
             next_index: Arc::new(RwLock::new(next_index)),
             match_index: Arc::new(RwLock::new(match_index)),
             leader_hint: Arc::new(RwLock::new(None)),
+            registered_users: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -471,6 +473,10 @@ impl NetNode {
                             *commit_index = leader_commit.min(log.len() as u64);
                             info!("Node {} updated commit_index to {}", self.id, *commit_index);
                         }
+                                                // Apply any newly committed entries on this follower as well
+                        drop(commit_index); // release lock before await
+                        drop(log);          // release lock before await
+                        self.apply_committed_entries().await;
                         success = true;
                     }
                 }
@@ -628,17 +634,44 @@ impl NetNode {
     }
 
     // Apply committed log entries to state machine
+        // Apply committed log entries to state machine
     async fn apply_committed_entries(&self) {
         let commit_index = *self.commit_index.read().await;
         let mut last_applied = self.last_applied.write().await;
-        
+
         if commit_index > *last_applied {
             let log = self.log.read().await;
             for i in (*last_applied + 1)..=commit_index {
                 if let Some(entry) = log.get(i as usize - 1) {
-                    // Here you would apply the command to your state machine
-                    // For now we'll just log it
-                    info!("Node {}: Applying command: {} (term {})", self.id, entry.command, entry.term);
+                    // Parse and apply: commands are simple strings like:
+                    // "REGISTER <user> <ip>" or "UNREGISTER <user>"
+                    let mut parts = entry.command.split_whitespace();
+                    match parts.next() {
+                        Some("REGISTER") => {
+                            if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
+                                self.registered_users
+                                    .write().await
+                                    .insert(user.to_string(), ip.to_string());
+                                info!("Node {}: Applied REGISTER {} {}", self.id, user, ip);
+                            } else {
+                                info!("Node {}: Malformed REGISTER command '{}'", self.id, entry.command);
+                            }
+                        }
+                        Some("UNREGISTER") => {
+                            if let Some(user) = parts.next() {
+                                self.registered_users
+                                    .write().await
+                                    .remove(user);
+                                info!("Node {}: Applied UNREGISTER {}", self.id, user);
+                            } else {
+                                info!("Node {}: Malformed UNREGISTER command '{}'", self.id, entry.command);
+                            }
+                        }
+                        Some(other) => {
+                            info!("Node {}: Unknown command '{}'", self.id, other);
+                        }
+                        None => {}
+                    }
                 }
             }
             *last_applied = commit_index;
@@ -765,7 +798,7 @@ impl NetNode {
         let mut line = String::new();
 
         w.write_all(b"Welcome to Cloud P2P Node API!\n").await?;
-        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST\n").await?;
+        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST | SHOW_USERS\n").await?;
 
         loop {
             line.clear();
@@ -839,6 +872,18 @@ impl NetNode {
                         }
                     }
                 }
+                
+                Some("SHOW_USERS") => {
+                    let users = self.registered_users.read().await;
+                    if users.is_empty() {
+                        w.write_all(b"(empty)\n").await?;
+                    } else {
+                        for (u, ip) in users.iter() {
+                            w.write_all(format!("{} {}\n", u, ip).as_bytes()).await?;
+                        }
+                    }
+                }
+
 
                 Some(unknown) => {
                     let s = format!("ERR unknown command: {}\n", unknown);
