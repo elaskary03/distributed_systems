@@ -111,6 +111,9 @@ struct NetNode {
     // Hint for who is leader (updated when we receive AppendEntries)
     leader_hint: Arc<RwLock<Option<u32>>>,
     registered_users: Arc<RwLock<HashMap<String, String>>>,
+    // Idempotency for broadcasted client requests
+    processed_ops: Arc<RwLock<std::collections::HashSet<String>>>,
+
 }
 
 impl NetNode {
@@ -142,6 +145,7 @@ impl NetNode {
             match_index: Arc::new(RwLock::new(match_index)),
             leader_hint: Arc::new(RwLock::new(None)),
             registered_users: Arc::new(RwLock::new(HashMap::new())),
+            processed_ops: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
     }
 
@@ -159,6 +163,39 @@ impl NetNode {
             log.get(prev_log_index as usize - 1).map(|e| e.term).unwrap_or(0)
         };
         (prev_log_index, prev_log_term)
+    }
+
+    fn client_addr_for(id: u32) -> String {
+        format!("127.0.0.1:{}", 9000 + id)
+    }
+
+    async fn forward_to_leader(&self, cmd_line: &str) -> anyhow::Result<String> {
+        let lid = (*self.leader_hint.read().await)
+            .ok_or_else(|| anyhow::anyhow!("no leader hint"))?;
+        let addr = NetNode::client_addr_for(lid);
+
+        let stream = TcpStream::connect(addr).await?;
+        let (r, mut w) = stream.into_split();
+        let mut reader = BufReader::new(r);
+
+        // Read the 2-line banner
+        let mut tmp = String::new();
+        reader.read_line(&mut tmp).await?; // "Welcome..."
+        tmp.clear();
+        reader.read_line(&mut tmp).await?; // "Commands: ..."
+
+        // Send the same command to the leader
+        w.write_all(cmd_line.as_bytes()).await?;
+        w.write_all(b"\n").await?;
+
+        // Read one response burst (OK / NOT_LEADER / REDIRECT / multi-line list)
+        // For our writes we only need 'OK' or a line.
+        let mut buf = String::new();
+        // Try to read a few lines quickly; stop if no data comes for a moment
+        // (simple approach: read up to 8KB or until reader would block)
+        // Here: read until first newline
+        reader.read_line(&mut buf).await?;
+        Ok(buf)
     }
 
     async fn start(self: Arc<Self>, listen_addr: SocketAddr) -> anyhow::Result<()> {
@@ -300,6 +337,15 @@ impl NetNode {
         // Start heartbeat loop
         let hnode = self.clone();
         tokio::spawn(async move { hnode.heartbeat_loop().await });
+
+        // Apply-committer: runs on ALL nodes (leaders & followers)
+        let applier = self.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_millis(100)).await;
+                applier.apply_committed_entries().await;
+            }
+        });
 
         // Start client API listener on a port (9000 + node id)
         let client_node = self.clone();
@@ -798,7 +844,7 @@ impl NetNode {
         let mut line = String::new();
 
         w.write_all(b"Welcome to Cloud P2P Node API!\n").await?;
-        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST | SHOW_USERS\n").await?;
+        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST | SHOW_USERS | SUBMIT <op_id> <command...>\n").await?;
 
         loop {
             line.clear();
@@ -821,7 +867,20 @@ impl NetNode {
 
                 Some("REGISTER") => {
                     if !is_leader {
-                        w.write_all(b"NOT_LEADER\n").await?;
+                        match self.forward_to_leader(cmd).await {
+                            Ok(reply) => {
+                                w.write_all(reply.as_bytes()).await?;
+                            }
+                            Err(_) => {
+                                // fallback to hint if we can
+                                if let Some(lid) = *self.leader_hint.read().await {
+                                    let addr = NetNode::client_addr_for(lid);
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                } else {
+                                    w.write_all(b"NOT_LEADER\n").await?;
+                                }
+                            }
+                        }
                         continue;
                     }
                     let user = match parts.next() {
@@ -846,7 +905,20 @@ impl NetNode {
 
                 Some("UNREGISTER") => {
                     if !is_leader {
-                        w.write_all(b"NOT_LEADER\n").await?;
+                        match self.forward_to_leader(cmd).await {
+                            Ok(reply) => {
+                                w.write_all(reply.as_bytes()).await?;
+                            }
+                            Err(_) => {
+                                // fallback to hint if we can
+                                if let Some(lid) = *self.leader_hint.read().await {
+                                    let addr = NetNode::client_addr_for(lid);
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                } else {
+                                    w.write_all(b"NOT_LEADER\n").await?;
+                                }
+                            }
+                        }
                         continue;
                     }
                     let user = match parts.next() {
@@ -882,6 +954,50 @@ impl NetNode {
                             w.write_all(format!("{} {}\n", u, ip).as_bytes()).await?;
                         }
                     }
+                }
+
+                                Some("SUBMIT") => {
+                    // Usage: SUBMIT <op_id> <command...>
+                    let op_id = match parts.next() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?;
+                            continue;
+                        }
+                    };
+                    let rest = parts.collect::<Vec<_>>().join(" ");
+                    if rest.is_empty() {
+                        w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?;
+                        continue;
+                    }
+
+                    // Idempotency: if we've seen this op_id, acknowledge
+                    {
+                        let seen = self.processed_ops.read().await;
+                        if seen.contains(&op_id) {
+                            w.write_all(b"OK\n").await?;
+                            continue;
+                        }
+                    }
+
+                    let is_leader = matches!(*self.state.read().await, RaftState::Leader);
+                    if !is_leader {
+                        if let Some(lid) = *self.leader_hint.read().await {
+                            let addr = NetNode::client_addr_for(lid);
+                            w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                        } else {
+                            w.write_all(b"NOT_LEADER\n").await?;
+                        }
+                        continue;
+                    }
+
+                    // Leader path: mark op_id seen, then append+replicate the payload
+                    {
+                        let mut seen = self.processed_ops.write().await;
+                        seen.insert(op_id);
+                    }
+                    self.append_and_replicate(rest).await;
+                    w.write_all(b"OK\n").await?;
                 }
 
 
