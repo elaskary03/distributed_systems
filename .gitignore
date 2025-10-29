@@ -1,0 +1,8 @@
+# Rust build artifacts
+**/target/
+
+# Logs from your test runs
+**/logs/
+
+# macOS junk
+.DS_Store
