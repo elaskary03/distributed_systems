@@ -3,7 +3,7 @@ use cloud_p2p_raft::data_structures::Command;
 use rand::{distributions::Alphanumeric, Rng};
 use std::{fs, net::SocketAddr, str::FromStr, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     time::sleep,
 };
@@ -126,7 +126,7 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
 
     // Present a simple banner (your proxy protocol)
     w.write_all(b"Welcome to Cloud P2P Proxy!\n").await?;
-    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER\n").await?;
+    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER | SEND_PHOTO <photo_id> <binary image data>\n").await?;
 
     loop {
         line.clear();
@@ -200,24 +200,22 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
                 let photo_id = match parts.next() {
                     Some(x) => x,
                     None => {
-                        w.write_all(b"Usage: SEND_PHOTO <photo_id>\n").await?;
+                        w.write_all(b"Usage: SEND_PHOTO <photo_id> <file_path>\n").await?;
+                        continue;
+                    }
+                };
+                let file_path = match parts.next() {
+                    Some(x) => x,
+                    None => {
+                        w.write_all(b"Usage: SEND_PHOTO <photo_id> <file_path>\n").await?;
                         continue;
                     }
                 };
 
-                // Read binary data from the client
-                let mut photo_data = Vec::new();
-                reader.read_to_end(&mut photo_data).await?;
-
+                // Forward the command as plain text to the node
                 let op_id = next_op_id();
-                let payload = Command::SendPhoto {
-                    photo_id: photo_id.to_string(),
-                    photo_data,
-                };
-
-                // Serialize the command and submit it
-                let serialized = serde_json::to_string(&payload)?;
-                let resp = submit_idempotent(&seeds, &cfg, &serialized).await;
+                let payload = format!("SUBMIT {} SEND_PHOTO {} {}", op_id, photo_id, file_path);
+                let resp = submit_idempotent(&seeds, &cfg, &payload).await;
                 write_line(&mut w, resp).await?;
             }
 
@@ -382,7 +380,7 @@ async fn parse_first_line(reader: &mut BufReader<tokio::net::tcp::ReadHalf<'_>>)
 /// Read-only helper: try each seed until one returns something.
 /// This reads *until EOF or socket close*, which works with your current node's single-line loop output.
 async fn query_any(seeds: &[SocketAddr], cmd_line: &str) -> anyhow::Result<String> {
-    let mut last_err: Option<anyhow::Error> = None;
+    let last_err: Option<anyhow::Error> = None;
 
     for &addr in seeds {
         if let Ok(s) = read_multiline(addr, cmd_line).await {

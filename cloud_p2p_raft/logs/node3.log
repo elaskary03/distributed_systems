@@ -1,7 +1,34 @@
+warning: unused import: `std::collections::HashMap`
+ --> src/data_structures.rs:2:5
+  |
+2 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `RwLock` and `mpsc`
+ --> src/data_structures.rs:3:19
+  |
+3 | use tokio::sync::{mpsc, RwLock};
+  |                   ^^^^  ^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src/data_structures.rs:4:5
+  |
+4 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `Duration` and `Instant`
+ --> src/data_structures.rs:5:19
+  |
+5 | use tokio::time::{Duration, Instant};
+  |                   ^^^^^^^^  ^^^^^^^
+
+warning: `cloud_p2p_raft` (lib) generated 4 warnings (run `cargo fix --lib -p cloud_p2p_raft` to apply 4 suggestions)
 warning: unused import: `self`
-  --> src/bin/node.rs:13:17
+  --> src/bin/node.rs:14:17
    |
-13 | use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+14 | use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
    |                 ^^^^
    |
    = note: `#[warn(unused_imports)]` on by default
@@ -9,104 +36,16 @@ warning: unused import: `self`
 warning: `cloud_p2p_raft` (bin "node") generated 1 warning (run `cargo fix --bin "node"` to apply 1 suggestion)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
      Running `target/debug/node --id 3 --addr '127.0.0.1:7003' --peers '1=127.0.0.1:7001,2=127.0.0.1:7002'`
-[2m2025-10-30T18:42:28.659363Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 listening on 127.0.0.1:7003
-[2m2025-10-30T18:42:28.660207Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 attempting to connect to peer 2 at 127.0.0.1:7002
-[2m2025-10-30T18:42:28.660186Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 attempting to connect to peer 1 at 127.0.0.1:7001
-[2m2025-10-30T18:42:28.660393Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 🌐 Node 3 client API listening on 127.0.0.1:9003
-[2m2025-10-30T18:42:28.660575Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 connected to peer 1 at 127.0.0.1:7001
-[2m2025-10-30T18:42:28.660638Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 connected to peer 2 at 127.0.0.1:7002
-[2m2025-10-30T18:42:29.956613Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 accepted connection from 127.0.0.1:59134
-[2m2025-10-30T18:42:29.976120Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:30.466028Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:30.638158Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 accepted connection from 127.0.0.1:59135
-[2m2025-10-30T18:42:30.968519Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:31.470321Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:31.972354Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:32.474274Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:32.976760Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:33.477198Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:33.979518Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:34.481344Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:34.983207Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:35.485899Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:35.988694Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:36.489729Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:36.991998Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:37.493477Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:37.994402Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:38.496889Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:38.998739Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:39.500001Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:40.001487Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:40.503725Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:41.005009Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:41.506668Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:42.008959Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:42.511027Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:43.013089Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:43.515114Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:44.017167Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:44.518946Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:45.020093Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:45.522129Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:46.024304Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:46.525281Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:47.027269Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:47.529560Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:48.031755Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:48.533476Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:49.035235Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:49.537626Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:50.039270Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:50.541831Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:51.043788Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:51.545764Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:52.047463Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:52.549837Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:53.051202Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:53.553852Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:54.055872Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:54.557003Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:55.059492Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:55.560700Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:56.062491Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:56.564757Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:57.066263Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:57.568866Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:58.071911Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:58.572881Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:59.074493Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:42:59.576851Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:00.077274Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:00.579924Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:01.082977Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:01.582924Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:02.085626Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:02.586147Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:03.088273Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:03.590751Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:04.092912Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:04.594444Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:05.098177Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:05.599299Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:06.101216Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:06.603891Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:07.106692Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:07.607927Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:08.109569Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:08.611579Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:09.113643Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:09.615192Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:10.117535Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:10.619027Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:11.121286Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:11.623717Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:12.125938Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:12.627668Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:13.128531Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:13.630511Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:14.131438Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:14.633347Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:15.135294Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:15.637039Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
-[2m2025-10-30T18:43:16.140192Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
+[2m2025-10-30T20:53:02.890138Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 listening on 127.0.0.1:7003
+[2m2025-10-30T20:53:02.890669Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 attempting to connect to peer 1 at 127.0.0.1:7001
+[2m2025-10-30T20:53:02.890692Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 attempting to connect to peer 2 at 127.0.0.1:7002
+[2m2025-10-30T20:53:02.891191Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 🌐 Node 3 client API listening on 127.0.0.1:9003
+[2m2025-10-30T20:53:02.891249Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 connected to peer 1 at 127.0.0.1:7001
+[2m2025-10-30T20:53:02.894052Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 connected to peer 2 at 127.0.0.1:7002
+[2m2025-10-30T20:53:02.914632Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 accepted connection from 127.0.0.1:60301
+[2m2025-10-30T20:53:04.436341Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 accepted connection from 127.0.0.1:60302
+[2m2025-10-30T20:53:04.439260Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
+[2m2025-10-30T20:53:04.940685Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
+[2m2025-10-30T20:53:05.441916Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
+[2m2025-10-30T20:53:05.944450Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)
+[2m2025-10-30T20:53:06.446655Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 3 received AppendEntries from 1 (term 1, 0 entries)

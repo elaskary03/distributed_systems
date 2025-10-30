@@ -1029,13 +1029,16 @@ impl NetNode {
 
 
                 Some("SEND_PHOTO") => {
-                    if let (Some(photo_id), Some(photo_data)) = (parts.next(), parts.next()) {
+                    if let (Some(photo_id), Some(file_path)) = (parts.next(), parts.next()) {
                         let photo_path = format!("photos/{}.jpg", photo_id);
-                        if let Ok(decoded_data) = base64::engine::general_purpose::STANDARD.decode(photo_data) {
-                            tokio::fs::write(&photo_path, decoded_data).await?;
-                            info!("Node {}: Saved photo {} to {}", self.id, photo_id, photo_path);
-                        } else {
-                            info!("Node {}: Failed to decode photo data for {}", self.id, photo_id);
+                        match tokio::fs::read(file_path).await {
+                            Ok(image_data) => {
+                                tokio::fs::write(&photo_path, image_data).await?;
+                                info!("Node {}: Saved photo {} from {} to {}", self.id, photo_id, file_path, photo_path);
+                            }
+                            Err(e) => {
+                                info!("Node {}: Failed to read photo file {}: {}", self.id, file_path, e);
+                            }
                         }
                     } else {
                         info!("Node {}: Malformed SEND_PHOTO command", self.id);
