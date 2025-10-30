@@ -1,261 +1,229 @@
-warning: unused import: `self`
-  --> src/bin/node.rs:13:17
-   |
-13 | use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
-   |                 ^^^^
-   |
-   = note: `#[warn(unused_imports)]` on by default
-
-warning: `cloud_p2p_raft` (bin "node") generated 1 warning (run `cargo fix --bin "node"` to apply 1 suggestion)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
-     Running `target/debug/node --id 1 --addr '127.0.0.1:7001' --peers '2=127.0.0.1:7002,3=127.0.0.1:7003'`
-[2m2025-10-29T23:39:05.119791Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 listening on 127.0.0.1:7001
-[2m2025-10-29T23:39:05.120125Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
-[2m2025-10-29T23:39:05.120144Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 3 at 127.0.0.1:7003
-[2m2025-10-29T23:39:05.120269Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 🌐 Node 1 client API listening on 127.0.0.1:9001
-[2m2025-10-29T23:39:05.120447Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 connected to peer 2 at 127.0.0.1:7002
-[2m2025-10-29T23:39:05.120465Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 3 at 127.0.0.1:7003 failed: Connection refused (os error 61). Retrying in 1s...
-[2m2025-10-29T23:39:06.122428Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 3 at 127.0.0.1:7003
-[2m2025-10-29T23:39:06.122660Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 3 at 127.0.0.1:7003 failed: Connection refused (os error 61). Retrying in 2s...
-[2m2025-10-29T23:39:06.213188Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 accepted connection from 127.0.0.1:60470
-[2m2025-10-29T23:39:07.442942Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 12
-[2m2025-10-29T23:39:07.545045Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:07.856276Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:08.123753Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 3 at 127.0.0.1:7003
-[2m2025-10-29T23:39:08.124062Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 3 at 127.0.0.1:7003 failed: Connection refused (os error 61). Retrying in 4s...
-[2m2025-10-29T23:39:08.302102Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 accepted connection from 127.0.0.1:60475
-[2m2025-10-29T23:39:08.357824Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:08.859594Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:09.360814Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:09.861726Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:10.122816Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 3, retrying...
-[2m2025-10-29T23:39:10.123215Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 reconnected to 3
-[2m2025-10-29T23:39:10.363499Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:10.864404Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:11.354161Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 3 for term 1
-[2m2025-10-29T23:39:11.366047Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:11.868848Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:12.014168Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 📡 Node 1 accepted client connection from 127.0.0.1:60478
-[2m2025-10-29T23:39:12.126700Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 3 at 127.0.0.1:7003
-[2m2025-10-29T23:39:12.127201Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 connected to peer 3 at 127.0.0.1:7003
-[2m2025-10-29T23:39:12.370267Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:12.872269Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:13.373774Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:13.875577Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:14.250122Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 📡 Node 1 accepted client connection from 127.0.0.1:60483
-[2m2025-10-29T23:39:14.377750Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:14.879302Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:15.380918Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:15.882318Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:16.384057Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:16.684009Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 📡 Node 1 accepted client connection from 127.0.0.1:60485
-[2m2025-10-29T23:39:16.885923Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:17.387712Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:17.889017Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:18.391609Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:18.893500Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:19.395528Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:19.897943Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
-[2m2025-10-29T23:39:22.208972Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.310951364s, starting election
-[2m2025-10-29T23:39:22.209029Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 13
-[2m2025-10-29T23:39:22.236092Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote reply from 3 (granted: true)
-[2m2025-10-29T23:39:22.236209Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1: term 13 has 2 granted votes out of 3
-[2m2025-10-29T23:39:22.311149Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 became leader for term 13
-[2m2025-10-29T23:39:22.311462Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Outbound connection 1 -> 2 failed: Broken pipe (os error 32)
-[2m2025-10-29T23:39:22.311523Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
-[2m2025-10-29T23:39:22.311791Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:22.311819Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 1s...
-[2m2025-10-29T23:39:22.311858Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:22.417251Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 📡 Node 1 accepted client connection from 127.0.0.1:60488
-[2m2025-10-29T23:39:22.677842Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:22.677904Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:23.180328Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:23.180390Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:23.313183Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
-[2m2025-10-29T23:39:23.313429Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 2s...
-[2m2025-10-29T23:39:23.681179Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:23.681241Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:23.832836Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 📡 Node 1 accepted client connection from 127.0.0.1:60490
-[2m2025-10-29T23:39:24.183381Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:24.183473Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:24.685294Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:24.685394Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:25.128888Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
-[2m2025-10-29T23:39:25.187117Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:25.187183Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:25.314840Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
-[2m2025-10-29T23:39:25.315216Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 4s...
-[2m2025-10-29T23:39:25.689285Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:25.689383Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:26.190088Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:26.190134Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:26.691106Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:26.691149Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:27.192857Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:27.192905Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:27.694633Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:27.694685Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:28.197183Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:28.197245Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:28.699714Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:28.699795Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:29.201286Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:29.201348Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:29.317242Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
-[2m2025-10-29T23:39:29.317513Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 8s...
-[2m2025-10-29T23:39:29.702285Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:29.702326Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:30.130525Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
-[2m2025-10-29T23:39:30.203604Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:30.203789Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:30.704348Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:30.704395Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:31.205393Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:31.205444Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:31.707222Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:31.707274Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:32.208662Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:32.208706Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:32.711199Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:32.711263Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:33.211873Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:33.211920Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:33.714192Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:33.714279Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:34.215275Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:34.215341Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:34.716950Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:34.717026Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:35.132111Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
-[2m2025-10-29T23:39:35.219142Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:35.219251Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:35.721391Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:35.721496Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:36.223586Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:36.223694Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:36.724098Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:36.724216Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:37.225796Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:37.225892Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:37.319343Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
-[2m2025-10-29T23:39:37.319748Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 16s...
-[2m2025-10-29T23:39:37.726582Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:37.726645Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:38.228337Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:38.228395Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:38.730282Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:38.730344Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:39.232290Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:39.232342Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:39.733294Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:39.733353Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:40.133951Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
-[2m2025-10-29T23:39:40.235213Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:40.235274Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:40.736624Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:40.736670Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:41.238855Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:41.238952Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:41.739747Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:41.739817Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:42.241262Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:42.241343Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:42.742278Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:42.742327Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:43.243782Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:43.243841Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:43.746629Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:43.746781Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:44.248221Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:44.248268Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:44.750072Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:44.750176Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:45.135196Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
-[2m2025-10-29T23:39:45.251799Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:45.251846Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:45.754417Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:45.754462Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:46.255152Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:46.255249Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:46.755973Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:46.756020Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:47.258680Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:47.258724Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:47.760747Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:47.760792Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:48.263732Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:48.263841Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:48.765603Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:48.765666Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:49.267386Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:49.267447Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:49.769080Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:49.769157Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:50.137063Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
-[2m2025-10-29T23:39:50.270877Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:50.270937Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:50.772459Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:50.772504Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:51.274194Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:51.274255Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:51.776490Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:51.776560Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:52.278165Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:52.278209Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:52.781079Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:52.781188Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:53.283471Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:53.283566Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:53.321615Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
-[2m2025-10-29T23:39:53.321813Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 30s...
-[2m2025-10-29T23:39:53.784917Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:53.785012Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:54.286694Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:54.286803Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:54.787906Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:54.787966Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:55.138678Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
-[2m2025-10-29T23:39:55.289406Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:55.289469Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:55.790828Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:55.790934Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:56.291855Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:56.291952Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:56.793391Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:56.793497Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:57.294245Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:57.294306Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:57.795292Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:57.795342Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:58.297237Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:58.297305Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:58.798893Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:58.799033Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:59.299670Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:59.299771Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:39:59.801144Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:39:59.801207Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:00.140600Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
-[2m2025-10-29T23:40:00.303777Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:00.303837Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:00.805656Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:00.805719Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:01.307314Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:01.307385Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:01.808996Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:01.809056Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:02.310842Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:02.310904Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:02.812503Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:02.812577Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:03.314795Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:03.314850Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:03.818135Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:03.818246Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:04.319720Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:04.319830Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:04.820366Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:04.820441Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-29T23:40:05.142283Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
-[2m2025-10-29T23:40:05.322615Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-29T23:40:05.322676Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-30T18:58:46.699091Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 listening on 0.0.0.0:7001
+[2m2025-10-30T18:58:46.699504Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 10.40.32.1:7002
+[2m2025-10-30T18:58:46.699598Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 🌐 Node 1 client API listening on 127.0.0.1:9001
+[2m2025-10-30T18:58:46.749990Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 accepted connection from 10.40.62.24:21528
+[2m2025-10-30T18:58:47.704202Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 10.40.32.1:7002 failed: Connection refused (os error 61). Retrying in 1s...
+[2m2025-10-30T18:58:48.705843Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 10.40.32.1:7002
+[2m2025-10-30T18:58:48.867834Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 4
+[2m2025-10-30T18:58:49.715365Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 10.40.32.1:7002 failed: Connection refused (os error 61). Retrying in 2s...
+[2m2025-10-30T18:58:51.472445Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 5
+[2m2025-10-30T18:58:51.701490Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:58:51.717450Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 10.40.32.1:7002
+[2m2025-10-30T18:58:52.721532Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 10.40.32.1:7002 failed: Connection refused (os error 61). Retrying in 4s...
+[2m2025-10-30T18:58:53.947484Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.44744275s, starting election
+[2m2025-10-30T18:58:53.947583Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 6
+[2m2025-10-30T18:58:54.442011Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 6
+[2m2025-10-30T18:58:56.702874Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:58:56.722810Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 10.40.32.1:7002
+[2m2025-10-30T18:58:56.799866Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.852272625s, starting election
+[2m2025-10-30T18:58:56.799908Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 7
+[2m2025-10-30T18:58:57.417919Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 7
+[2m2025-10-30T18:58:57.729675Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 10.40.32.1:7002 failed: Connection refused (os error 61). Retrying in 8s...
+[2m2025-10-30T18:58:59.348094Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.548150833s, starting election
+[2m2025-10-30T18:58:59.348191Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 8
+[2m2025-10-30T18:59:00.074479Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 8
+[2m2025-10-30T18:59:01.705676Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:02.511062Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 3.162835583s, starting election
+[2m2025-10-30T18:59:02.511163Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 9
+[2m2025-10-30T18:59:02.572816Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 9
+[2m2025-10-30T18:59:04.888812Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 10
+[2m2025-10-30T18:59:05.732394Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 10.40.32.1:7002
+[2m2025-10-30T18:59:06.708398Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:06.739390Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 10.40.32.1:7002 failed: Connection refused (os error 61). Retrying in 16s...
+[2m2025-10-30T18:59:07.304215Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.344280875s, starting election
+[2m2025-10-30T18:59:07.304313Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 11
+[2m2025-10-30T18:59:07.550332Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 11
+[2m2025-10-30T18:59:09.752351Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.448013375s, starting election
+[2m2025-10-30T18:59:09.752446Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 12
+[2m2025-10-30T18:59:09.803091Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 12
+[2m2025-10-30T18:59:11.709997Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:12.302102Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.549622542s, starting election
+[2m2025-10-30T18:59:12.302202Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 13
+[2m2025-10-30T18:59:12.519028Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 13
+[2m2025-10-30T18:59:14.547533Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.245304833s, starting election
+[2m2025-10-30T18:59:14.547627Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 14
+[2m2025-10-30T18:59:15.254955Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 14
+[2m2025-10-30T18:59:16.712767Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:16.894008Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.346352667s, starting election
+[2m2025-10-30T18:59:16.894106Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 15
+[2m2025-10-30T18:59:18.220419Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 15
+[2m2025-10-30T18:59:19.543073Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.648938959s, starting election
+[2m2025-10-30T18:59:19.543172Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 16
+[2m2025-10-30T18:59:20.749562Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 16
+[2m2025-10-30T18:59:21.715634Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:22.395915Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.852713292s, starting election
+[2m2025-10-30T18:59:22.396016Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 17
+[2m2025-10-30T18:59:22.741361Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 10.40.32.1:7002
+[2m2025-10-30T18:59:23.374914Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 17
+[2m2025-10-30T18:59:23.753161Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 10.40.32.1:7002 failed: Connection refused (os error 61). Retrying in 30s...
+[2m2025-10-30T18:59:24.945039Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.548998208s, starting election
+[2m2025-10-30T18:59:24.945136Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 18
+[2m2025-10-30T18:59:25.881446Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 18
+[2m2025-10-30T18:59:26.716975Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:27.598538Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.653372958s, starting election
+[2m2025-10-30T18:59:27.598640Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 19
+[2m2025-10-30T18:59:27.877426Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 19
+[2m2025-10-30T18:59:30.047262Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.448594708s, starting election
+[2m2025-10-30T18:59:30.047358Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 20
+[2m2025-10-30T18:59:31.000102Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 20
+[2m2025-10-30T18:59:31.719570Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:32.085904Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.038521083s, starting election
+[2m2025-10-30T18:59:32.085999Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 21
+[2m2025-10-30T18:59:33.326701Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 21
+[2m2025-10-30T18:59:34.332280Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.246254041s, starting election
+[2m2025-10-30T18:59:34.332391Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 22
+[2m2025-10-30T18:59:35.960880Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 22
+[2m2025-10-30T18:59:36.721587Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:37.188500Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.856078667s, starting election
+[2m2025-10-30T18:59:37.188594Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 23
+[2m2025-10-30T18:59:38.348979Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 23
+[2m2025-10-30T18:59:39.941218Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.752593417s, starting election
+[2m2025-10-30T18:59:39.941315Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 24
+[2m2025-10-30T18:59:41.034741Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 24
+[2m2025-10-30T18:59:41.723282Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:42.285552Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.344211084s, starting election
+[2m2025-10-30T18:59:42.285660Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 25
+[2m2025-10-30T18:59:44.232651Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 25
+[2m2025-10-30T18:59:44.732764Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.447076666s, starting election
+[2m2025-10-30T18:59:44.732867Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 26
+[2m2025-10-30T18:59:46.725921Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:47.077246Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 26
+[2m2025-10-30T18:59:47.382643Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.649747916s, starting election
+[2m2025-10-30T18:59:47.382751Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 27
+[2m2025-10-30T18:59:49.565037Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 27
+[2m2025-10-30T18:59:50.236390Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.853610375s, starting election
+[2m2025-10-30T18:59:50.236480Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 28
+[2m2025-10-30T18:59:51.727641Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:52.506460Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 28
+[2m2025-10-30T18:59:52.785742Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.549232125s, starting election
+[2m2025-10-30T18:59:52.785837Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 29
+[2m2025-10-30T18:59:53.755536Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 10.40.32.1:7002
+[2m2025-10-30T18:59:54.593397Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 29
+[2m2025-10-30T18:59:54.763628Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 10.40.32.1:7002 failed: Connection refused (os error 61). Retrying in 30s...
+[2m2025-10-30T18:59:55.434301Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.648436s, starting election
+[2m2025-10-30T18:59:55.434397Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 30
+[2m2025-10-30T18:59:56.729576Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T18:59:56.999765Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 30
+[2m2025-10-30T18:59:58.292140Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.857713459s, starting election
+[2m2025-10-30T18:59:58.292240Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 31
+[2m2025-10-30T18:59:59.405432Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 31
+[2m2025-10-30T19:00:01.252755Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.960488083s, starting election
+[2m2025-10-30T19:00:01.252833Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 32
+[2m2025-10-30T19:00:01.731586Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:02.156249Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 32
+[2m2025-10-30T19:00:03.495273Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.242413625s, starting election
+[2m2025-10-30T19:00:03.495371Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 33
+[2m2025-10-30T19:00:04.794131Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 33
+[2m2025-10-30T19:00:05.940713Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.445313625s, starting election
+[2m2025-10-30T19:00:05.940810Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 34
+[2m2025-10-30T19:00:06.733517Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:07.373518Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 34
+[2m2025-10-30T19:00:08.490851Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.550012458s, starting election
+[2m2025-10-30T19:00:08.490946Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 35
+[2m2025-10-30T19:00:09.912767Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 35
+[2m2025-10-30T19:00:11.042055Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.551080542s, starting election
+[2m2025-10-30T19:00:11.042150Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 36
+[2m2025-10-30T19:00:11.735831Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:12.110732Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 36
+[2m2025-10-30T19:00:13.385039Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.342860583s, starting election
+[2m2025-10-30T19:00:13.385143Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 37
+[2m2025-10-30T19:00:14.740720Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 37
+[2m2025-10-30T19:00:16.035329Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.650157375s, starting election
+[2m2025-10-30T19:00:16.035437Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 38
+[2m2025-10-30T19:00:16.737992Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:17.359262Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 38
+[2m2025-10-30T19:00:18.074545Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.039083209s, starting election
+[2m2025-10-30T19:00:18.074640Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 39
+[2m2025-10-30T19:00:19.845352Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 39
+[2m2025-10-30T19:00:21.134883Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 3.060212375s, starting election
+[2m2025-10-30T19:00:21.134989Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 40
+[2m2025-10-30T19:00:21.738620Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:22.508089Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 40
+[2m2025-10-30T19:00:23.581236Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.446227125s, starting election
+[2m2025-10-30T19:00:23.581332Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 41
+[2m2025-10-30T19:00:24.764092Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 41
+[2m2025-10-30T19:00:24.764286Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 10.40.32.1:7002
+[2m2025-10-30T19:00:25.770693Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 10.40.32.1:7002 failed: Connection refused (os error 61). Retrying in 30s...
+[2m2025-10-30T19:00:26.133596Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.552235625s, starting election
+[2m2025-10-30T19:00:26.133689Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 42
+[2m2025-10-30T19:00:26.740707Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:27.218012Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 42
+[2m2025-10-30T19:00:28.376287Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.24256925s, starting election
+[2m2025-10-30T19:00:28.376391Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 43
+[2m2025-10-30T19:00:29.983084Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 43
+[2m2025-10-30T19:00:30.517190Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.1407755s, starting election
+[2m2025-10-30T19:00:30.517288Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 44
+[2m2025-10-30T19:00:31.741857Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:32.133991Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 44
+[2m2025-10-30T19:00:33.474396Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.95707675s, starting election
+[2m2025-10-30T19:00:33.474499Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 45
+[2m2025-10-30T19:00:34.690481Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 45
+[2m2025-10-30T19:00:35.719816Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.245294209s, starting election
+[2m2025-10-30T19:00:35.719911Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 46
+[2m2025-10-30T19:00:36.742914Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:37.143175Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 46
+[2m2025-10-30T19:00:38.574451Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.8545105s, starting election
+[2m2025-10-30T19:00:38.574546Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 47
+[2m2025-10-30T19:00:39.765783Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 47
+[2m2025-10-30T19:00:40.929389Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.354814792s, starting election
+[2m2025-10-30T19:00:40.929484Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 48
+[2m2025-10-30T19:00:41.744041Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:42.314005Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 48
+[2m2025-10-30T19:00:43.470568Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.541056541s, starting election
+[2m2025-10-30T19:00:43.470650Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 49
+[2m2025-10-30T19:00:44.657334Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 49
+[2m2025-10-30T19:00:45.816722Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.346043167s, starting election
+[2m2025-10-30T19:00:45.816827Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 50
+[2m2025-10-30T19:00:46.745458Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:47.698858Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 50
+[2m2025-10-30T19:00:48.062778Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.245924334s, starting election
+[2m2025-10-30T19:00:48.062875Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 51
+[2m2025-10-30T19:00:49.851292Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 51
+[2m2025-10-30T19:00:50.406473Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.343571125s, starting election
+[2m2025-10-30T19:00:50.406578Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 52
+[2m2025-10-30T19:00:51.747851Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:52.306919Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 52
+[2m2025-10-30T19:00:53.058908Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.652301834s, starting election
+[2m2025-10-30T19:00:53.059010Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 53
+[2m2025-10-30T19:00:54.458837Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 53
+[2m2025-10-30T19:00:55.403212Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.344175709s, starting election
+[2m2025-10-30T19:00:55.403309Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 54
+[2m2025-10-30T19:00:55.772831Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 10.40.32.1:7002
+[2m2025-10-30T19:00:56.750224Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:00:56.788905Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 10.40.32.1:7002 failed: Connection refused (os error 61). Retrying in 30s...
+[2m2025-10-30T19:00:57.265889Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 54
+[2m2025-10-30T19:00:57.648732Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.245396208s, starting election
+[2m2025-10-30T19:00:57.648829Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 55
+[2m2025-10-30T19:00:59.987035Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 55
+[2m2025-10-30T19:00:59.997321Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.348479167s, starting election
+[2m2025-10-30T19:00:59.997379Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 56
+[2m2025-10-30T19:01:01.751932Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:01:02.152755Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 56
+[2m2025-10-30T19:01:02.343861Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.3464485s, starting election
+[2m2025-10-30T19:01:02.343960Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 57
+[2m2025-10-30T19:01:04.689888Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.34590075s, starting election
+[2m2025-10-30T19:01:04.689991Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 58
+[2m2025-10-30T19:01:04.967581Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 57
+[2m2025-10-30T19:01:06.753934Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:01:06.830929Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.140911916s, starting election
+[2m2025-10-30T19:01:06.831035Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 59
+[2m2025-10-30T19:01:07.464129Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 58
+[2m2025-10-30T19:01:09.687651Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.856588167s, starting election
+[2m2025-10-30T19:01:09.687752Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 60
+[2m2025-10-30T19:01:10.023698Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 59
+[2m2025-10-30T19:01:11.046120Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Inbound handler error from 10.40.62.24:21528: Connection reset by peer (os error 54)
+[2m2025-10-30T19:01:11.756264Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:01:12.036695Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.348916458s, starting election
+[2m2025-10-30T19:01:12.036792Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 61
+[2m2025-10-30T19:01:14.485518Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.4487085s, starting election
+[2m2025-10-30T19:01:14.485622Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 62
+[2m2025-10-30T19:01:16.758324Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:01:17.439927Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.954310958s, starting election
+[2m2025-10-30T19:01:17.440024Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 63
+[2m2025-10-30T19:01:20.602496Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 3.162440541s, starting election
+[2m2025-10-30T19:01:20.602594Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 64
+[2m2025-10-30T19:01:21.759629Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-30T19:01:23.151256Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.548636375s, starting election
+[2m2025-10-30T19:01:23.151351Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 65
+[2m2025-10-30T19:01:25.495930Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.344550125s, starting election
+[2m2025-10-30T19:01:25.496029Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 66

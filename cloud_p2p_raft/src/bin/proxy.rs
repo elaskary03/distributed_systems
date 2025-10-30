@@ -1,8 +1,9 @@
 use clap::{Parser, ValueEnum};
+use cloud_p2p_raft::data_structures::Command; // Updated import path to use the library root
 use rand::{distributions::Alphanumeric, Rng};
 use std::{net::SocketAddr, str::FromStr, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     time::sleep,
 };
@@ -152,6 +153,31 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
                     Ok(None) => w.write_all(b"NO_LEADER\n").await?,
                     Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
                 }
+            }
+
+            "SEND_PHOTO" => {
+                let photo_id = match parts.next() {
+                    Some(x) => x,
+                    None => {
+                        w.write_all(b"Usage: SEND_PHOTO <photo_id>\n").await?;
+                        continue;
+                    }
+                };
+
+                // Read binary data from the client
+                let mut photo_data = Vec::new();
+                reader.read_to_end(&mut photo_data).await?;
+
+                let op_id = next_op_id();
+                let payload = Command::SendPhoto {
+                    photo_id: photo_id.to_string(),
+                    photo_data,
+                };
+
+                // Serialize the command and submit it
+                let serialized = serde_json::to_string(&payload)?;
+                let resp = submit_idempotent(&seeds, &cfg, &serialized).await;
+                write_line(&mut w, resp).await?;
             }
 
             _ => {

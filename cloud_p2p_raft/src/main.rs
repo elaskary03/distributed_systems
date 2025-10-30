@@ -1,3 +1,5 @@
+mod data_structures;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock, Mutex};

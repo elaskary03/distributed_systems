@@ -1,3 +1,4 @@
+use base64::Engine; // Import the Engine trait for base64 decoding
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1026,6 +1027,20 @@ impl NetNode {
                     w.write_all(b"OK\n").await?;
                 }
 
+
+                Some("SEND_PHOTO") => {
+                    if let (Some(photo_id), Some(photo_data)) = (parts.next(), parts.next()) {
+                        let photo_path = format!("photos/{}.jpg", photo_id);
+                        if let Ok(decoded_data) = base64::engine::general_purpose::STANDARD.decode(photo_data) {
+                            tokio::fs::write(&photo_path, decoded_data).await?;
+                            info!("Node {}: Saved photo {} to {}", self.id, photo_id, photo_path);
+                        } else {
+                            info!("Node {}: Failed to decode photo data for {}", self.id, photo_id);
+                        }
+                    } else {
+                        info!("Node {}: Malformed SEND_PHOTO command", self.id);
+                    }
+                }
 
                 Some(unknown) => {
                     let s = format!("ERR unknown command: {}\n", unknown);

@@ -20,10 +20,8 @@ axum = "0.7"
 hyper = "1"
 tower = "0.5"
 thiserror = "1"
+base64 = "0.21"
 
-[[bin]]
-name = "gui"
-path = "src/gui.rs"
 
 [[bin]]
 name = "proxy"

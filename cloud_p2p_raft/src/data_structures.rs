@@ -24,7 +24,7 @@ pub enum Command {
     UnregisterUser { user_id: String },
     UpdateLoadBalancing { server_id: u32, load: f64 },
     EncryptImage { image_id: String, metadata: String },
-    SendPhoto { photo_id: String, photo_data: Vec<u8> }, // New variant
+    SendPhoto { photo_id: String, photo_data: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
