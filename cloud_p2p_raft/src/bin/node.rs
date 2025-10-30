@@ -720,7 +720,7 @@ impl NetNode {
             for i in (*last_applied + 1)..=commit_index {
                 if let Some(entry) = log.get(i as usize - 1) {
                     // Parse and apply: commands are simple strings like:
-                    // "REGISTER <user> <ip>" or "UNREGISTER <user>"
+                    // "REGISTER <user> <ip>", "UNREGISTER <user>", or "SEND_PHOTO <photo_id> <file_path>"
                     let mut parts = entry.command.split_whitespace();
                     match parts.next() {
                         Some("REGISTER") => {
@@ -741,6 +741,22 @@ impl NetNode {
                                 info!("Node {}: Applied UNREGISTER {}", self.id, user);
                             } else {
                                 info!("Node {}: Malformed UNREGISTER command '{}'", self.id, entry.command);
+                            }
+                        }
+                        Some("SEND_PHOTO") => {
+                            if let (Some(photo_id), Some(file_path)) = (parts.next(), parts.next()) {
+                                let photo_path = format!("photos/{}.jpg", photo_id);
+                                match tokio::fs::read(file_path).await {
+                                    Ok(image_data) => {
+                                        tokio::fs::write(&photo_path, image_data).await.ok();
+                                        info!("Node {}: Applied SEND_PHOTO {} from {} to {}", self.id, photo_id, file_path, photo_path);
+                                    }
+                                    Err(e) => {
+                                        info!("Node {}: Failed to read photo file {}: {}", self.id, file_path, e);
+                                    }
+                                }
+                            } else {
+                                info!("Node {}: Malformed SEND_PHOTO command '{}'", self.id, entry.command);
                             }
                         }
                         Some(other) => {
