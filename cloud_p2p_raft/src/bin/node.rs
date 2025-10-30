@@ -24,6 +24,9 @@ struct Args {
     /// Peers list: comma separated id=addr (e.g. "2=192.168.1.101:7002,3=192.168.1.102:7003")
     #[arg(long)]
     peers: String,
+    /// Bootstrap node address (optional)
+    #[arg(long)]
+    bootstrap: Option<String>,
     /// Client API listen address (e.g. "0.0.0.0:9001")
     #[arg(long, default_value = "127.0.0.1:9000")]
     client_addr: String,
@@ -69,6 +72,14 @@ pub enum RaftMessage {
         sender_id: u32,
         success: bool,
     },
+    /// Dynamic join control messages
+    NodeJoin {
+        node_id: u32,
+        addr: String,
+    },
+    NodeList {
+        peers: Vec<(u32, String)>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,7 +110,7 @@ struct NetNode {
     state: Arc<RwLock<RaftState>>,
     current_term: Arc<RwLock<u64>>,
     voted_for: Arc<RwLock<Option<u32>>>,
-    peers: Arc<HashMap<u32, SocketAddr>>,
+    peers: Arc<RwLock<HashMap<u32, SocketAddr>>>,
     outbound: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RaftMessage>>>>,
     last_heartbeat: Arc<RwLock<Instant>>,
     votes_received: Arc<RwLock<HashMap<u64, HashMap<u32, bool>>>>,
@@ -118,8 +129,7 @@ struct NetNode {
 
 impl NetNode {
     pub fn new(id: u32, peers: HashMap<u32, SocketAddr>) -> Self {
-        let peers_arc = Arc::new(peers);
-        let peer_ids: Vec<u32> = peers_arc.keys().cloned().collect();
+        let peer_ids: Vec<u32> = peers.keys().cloned().collect();
         
         // Initialize next_index and match_index for all peers
         let mut next_index = HashMap::new();
@@ -134,7 +144,7 @@ impl NetNode {
             state: Arc::new(RwLock::new(RaftState::Follower)),
             current_term: Arc::new(RwLock::new(0)),
             voted_for: Arc::new(RwLock::new(None)),
-            peers: peers_arc,
+            peers: Arc::new(RwLock::new(peers)),
             outbound: Arc::new(Mutex::new(HashMap::new())),
             last_heartbeat: Arc::new(RwLock::new(Instant::now())),
             votes_received: Arc::new(RwLock::new(HashMap::new())),
@@ -235,7 +245,8 @@ impl NetNode {
                         let commit_index = *input_node.commit_index.read().await;
                         let log = input_node.log.read().await;
 
-                        for (&peer_id, _) in input_node.peers.iter() {
+                        let peers_map = input_node.peers.read().await;
+                        for (&peer_id, _) in peers_map.iter() {
                             let next_index = {
                                 let next_indices = input_node.next_index.read().await;
                                 next_indices.get(&peer_id).copied().unwrap_or(1)
@@ -292,7 +303,8 @@ impl NetNode {
         });
 
         // Connect to peers (outbound) with exponential backoff
-        for (&peer_id, &addr) in self.peers.iter() {
+        let peers_snapshot = self.peers.read().await.clone();
+        for (&peer_id, &addr) in peers_snapshot.iter() {
             let node = self.clone();
             tokio::spawn(async move {
                 let mut backoff = Duration::from_secs(1);
@@ -362,12 +374,31 @@ impl NetNode {
     }
 
     async fn handle_inbound(&self, stream: TcpStream) -> anyhow::Result<()> {
-        let mut framed = FramedRead::new(stream, LengthDelimitedCodec::new());
+        // Split the stream so we can both read frames and write replies on the same
+        // connection (used for bootstrap join responses).
+        let (r, w) = stream.into_split();
+        let mut framed = FramedRead::new(r, LengthDelimitedCodec::new());
+        let mut writer = FramedWrite::new(w, LengthDelimitedCodec::new());
+
         while let Some(frame_res) = framed.next().await {
             let frame = frame_res?; // BytesMut
             let vec = frame.to_vec();
             if let Ok(msg) = serde_json::from_slice::<RaftMessage>(&vec) {
-                self.handle_message(msg).await;
+                // Handle the message (update state, spawn outbound tasks, broadcast NodeJoin etc.)
+                self.handle_message(msg.clone()).await;
+
+                // If this was a NodeJoin, send back a NodeList response with our known peers
+                if let RaftMessage::NodeJoin { node_id: _node_id, addr: _addr } = msg {
+                    let peers_map = self.peers.read().await;
+                    let mut list: Vec<(u32, String)> = Vec::new();
+                    for (pid, sa) in peers_map.iter() {
+                        list.push((*pid, sa.to_string()));
+                    }
+                    let reply = RaftMessage::NodeList { peers: list };
+                    if let Ok(payload) = serde_json::to_vec(&reply) {
+                        let _ = writer.send(Bytes::from(payload)).await;
+                    }
+                }
             }
         }
         Ok(())
@@ -411,6 +442,35 @@ impl NetNode {
             // no connection yet
             debug!("Node {}: no outbound for {}", self.id, target);
         }
+    }
+
+    // Spawn a background task that attempts to connect to `addr` and manage the outbound
+    // connection for `peer_id`. This mirrors the initial outbound connection logic used in
+    // `start()` so newly discovered peers will be connected to.
+    async fn spawn_outbound_task(&self, peer_id: u32, addr: SocketAddr) {
+        let node = self.clone();
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(1);
+            const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+            loop {
+                info!("Node {} attempting to connect to peer {} at {}", node.id, peer_id, addr);
+                match TcpStream::connect(addr).await {
+                    Ok(stream) => {
+                        info!("Node {} connected to peer {} at {}", node.id, peer_id, addr);
+                        backoff = Duration::from_secs(1);
+                        if let Err(e) = node.handle_outbound(peer_id, stream).await {
+                            error!("Outbound connection {} -> {} failed: {}", node.id, peer_id, e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Connect to peer {} at {} failed: {}. Retrying in {:?}...", peer_id, addr, e, backoff);
+                        sleep(backoff).await;
+                        backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
+                    }
+                }
+            }
+        });
     }
 
     async fn handle_message(&self, message: RaftMessage) {
@@ -560,6 +620,43 @@ impl NetNode {
                     }
                 }
             }
+            RaftMessage::NodeJoin { node_id, addr } => {
+                info!("Node {} received NodeJoin for {} at {}", self.id, node_id, addr);
+                if let Ok(sa) = addr.parse::<SocketAddr>() {
+                    let mut peers = self.peers.write().await;
+                    let replace = peers.insert(node_id, sa);
+                    drop(peers);
+                    // spawn outbound task to attempt connection
+                    self.spawn_outbound_task(node_id, sa).await;
+                    // broadcast to known peers (best-effort)
+                    let peers_map = self.peers.read().await;
+                    for (&peer_id, _) in peers_map.iter() {
+                        if peer_id == node_id { continue; }
+                        let join_msg = RaftMessage::NodeJoin { node_id, addr: addr.clone() };
+                        self.send_message(peer_id, join_msg).await;
+                    }
+                    if replace.is_some() {
+                        info!("Replaced existing peer entry for {}", node_id);
+                    }
+                } else {
+                    error!("Node {}: invalid NodeJoin addr {}", self.id, addr);
+                }
+            }
+            RaftMessage::NodeList { peers } => {
+                info!("Node {} received NodeList with {} peers", self.id, peers.len());
+                for (peer_id, addr_s) in peers {
+                    if let Ok(sa) = addr_s.parse::<SocketAddr>() {
+                        let mut peers_map = self.peers.write().await;
+                        if !peers_map.contains_key(&peer_id) {
+                            peers_map.insert(peer_id, sa);
+                            drop(peers_map);
+                            self.spawn_outbound_task(peer_id, sa).await;
+                        }
+                    } else {
+                        error!("Node {}: invalid peer addr in NodeList: {}", self.id, addr_s);
+                    }
+                }
+            }
         }
     }
 
@@ -581,7 +678,7 @@ impl NetNode {
             entry.insert(_sender_id, vote_granted);
             // count granted votes
             let granted_votes = entry.values().filter(|&&v| v).count();
-            let total = self.peers.len() + 1;
+            let total = self.peers.read().await.len() + 1;
             info!("Node {}: term {} has {} granted votes out of {}", self.id, term, granted_votes, total);
         if granted_votes > total / 2 && matches!(*self.state.read().await, RaftState::Candidate) {
             *self.state.write().await = RaftState::Leader;
@@ -592,14 +689,16 @@ impl NetNode {
             {
                 let mut next_indices = self.next_index.write().await;
                 let mut match_indices = self.match_index.write().await;
-                for (&peer_id, _) in self.peers.iter() {
+                let peers_map = self.peers.read().await;
+                for (&peer_id, _) in peers_map.iter() {
                     next_indices.insert(peer_id, last_index + 1); // 1-based, points to "next to send"
                     match_indices.insert(peer_id, 0);
                 }
             }
 
             // send initial heartbeat
-            for (&peer_id, _) in self.peers.iter() {
+            let peers_map = self.peers.read().await;
+            for (&peer_id, _) in peers_map.iter() {
                 let hb = RaftMessage::AppendEntries {
                     term: current_term,
                     leader_id: self.id,
@@ -669,7 +768,8 @@ impl NetNode {
             last_log_term,
         };
 
-        for (&peer_id, _) in self.peers.iter() {
+        let peers_map = self.peers.read().await;
+        for (&peer_id, _) in peers_map.iter() {
             self.send_message(peer_id, req.clone()).await;
         }
     }
@@ -740,7 +840,8 @@ impl NetNode {
             // Apply any newly committed entries
             self.apply_committed_entries().await;
             
-            for (&peer_id, _) in self.peers.iter() {
+            let peers_map = self.peers.read().await;
+            for (&peer_id, _) in peers_map.iter() {
                 let next_index = {
                     let next_indices = self.next_index.read().await;
                     next_indices.get(&peer_id).copied().unwrap_or(1)
@@ -1032,7 +1133,8 @@ impl NetNode {
         let commit_index = *self.commit_index.read().await;
         let log_snapshot = self.log.read().await;
 
-        for (&peer_id, _) in self.peers.iter() {
+    let peers_map = self.peers.read().await;
+    for (&peer_id, _) in peers_map.iter() {
             let next_index = {
                 let next_indices = self.next_index.read().await;
                 next_indices.get(&peer_id).copied().unwrap_or(1)
@@ -1075,6 +1177,55 @@ async fn main() -> anyhow::Result<()> {
     }
     let listen: SocketAddr = args.addr.parse()?;
     let node = Arc::new(NetNode::new(args.id, peers_map));
+    // If a bootstrap address was provided, contact it to announce ourselves and
+    // request the current peer list. We keep the connection open long enough to
+    // receive a NodeList reply (best-effort).
+    if let Some(bs) = args.bootstrap.clone() {
+        if let Ok(bs_addr) = bs.parse::<SocketAddr>() {
+            match TcpStream::connect(bs_addr).await {
+                Ok(stream) => {
+                    info!("Connected to bootstrap {}", bs_addr);
+                    let (r, w) = stream.into_split();
+                    let mut reader = FramedRead::new(r, LengthDelimitedCodec::new());
+                    let mut writer = FramedWrite::new(w, LengthDelimitedCodec::new());
+
+                    let join = RaftMessage::NodeJoin { node_id: args.id, addr: args.addr.clone() };
+                    if let Ok(payload) = serde_json::to_vec(&join) {
+                        let _ = writer.send(Bytes::from(payload)).await;
+                    }
+
+                    // Wait briefly for a NodeList reply
+                    use tokio::time::timeout;
+                    match timeout(Duration::from_secs(5), reader.next()).await {
+                        Ok(Some(Ok(frame))) => {
+                            if let Ok(msg) = serde_json::from_slice::<RaftMessage>(&frame.to_vec()) {
+                                if let RaftMessage::NodeList { peers } = msg {
+                                    for (pid, addr_s) in peers {
+                                        if let Ok(sa) = addr_s.parse::<SocketAddr>() {
+                                            let mut peers_map = node.peers.write().await;
+                                            if !peers_map.contains_key(&pid) {
+                                                peers_map.insert(pid, sa);
+                                                drop(peers_map);
+                                                node.spawn_outbound_task(pid, sa).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            info!("No NodeList reply from bootstrap {} (continuing)", bs_addr);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to connect to bootstrap {}: {}", bs, e);
+                }
+            }
+        } else {
+            error!("Invalid bootstrap address provided: {}", bs);
+        }
+    }
     node.clone().start(listen).await?;
     // keep alive
     loop { sleep(Duration::from_secs(3600)).await; }
