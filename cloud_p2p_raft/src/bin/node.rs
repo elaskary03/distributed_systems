@@ -27,12 +27,6 @@ struct Args {
     /// Client API listen address (e.g. "0.0.0.0:9001")
     #[arg(long, default_value = "127.0.0.1:9000")]
     client_addr: String,
-    /// Middleware port for long-lived client connections (transparent proxy to leader)
-    #[arg(long, default_value = "127.0.0.1:9100")]
-    middleware_addr: String,
-    /// Optional bootstrap address (used by launcher scripts to indicate a bootstrap node to contact)
-    #[arg(long)]
-    bootstrap: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,8 +69,6 @@ pub enum RaftMessage {
         sender_id: u32,
         success: bool,
     },
-    NodeJoin { id: u32, addr: String },
-    NodeList { peers: Vec<(u32, String)> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +99,7 @@ struct NetNode {
     state: Arc<RwLock<RaftState>>,
     current_term: Arc<RwLock<u64>>,
     voted_for: Arc<RwLock<Option<u32>>>,
-    peers: Arc<RwLock<HashMap<u32, SocketAddr>>>,
+    peers: Arc<HashMap<u32, SocketAddr>>,
     outbound: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RaftMessage>>>>,
     last_heartbeat: Arc<RwLock<Instant>>,
     votes_received: Arc<RwLock<HashMap<u64, HashMap<u32, bool>>>>,
@@ -121,15 +113,13 @@ struct NetNode {
     registered_users: Arc<RwLock<HashMap<String, String>>>,
     // Idempotency for broadcasted client requests
     processed_ops: Arc<RwLock<std::collections::HashSet<String>>>,
-    // own listen address (set when start() is called)
-    listen_addr: Arc<RwLock<Option<SocketAddr>>>,
 
 }
 
 impl NetNode {
     pub fn new(id: u32, peers: HashMap<u32, SocketAddr>) -> Self {
-        let peers_arc = Arc::new(RwLock::new(peers));
-        let peer_ids: Vec<u32> = { let r = futures::executor::block_on(peers_arc.read()); r.keys().cloned().collect() };
+        let peers_arc = Arc::new(peers);
+        let peer_ids: Vec<u32> = peers_arc.keys().cloned().collect();
         
         // Initialize next_index and match_index for all peers
         let mut next_index = HashMap::new();
@@ -156,7 +146,6 @@ impl NetNode {
             leader_hint: Arc::new(RwLock::new(None)),
             registered_users: Arc::new(RwLock::new(HashMap::new())),
             processed_ops: Arc::new(RwLock::new(std::collections::HashSet::new())),
-            listen_addr: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -209,7 +198,7 @@ impl NetNode {
         Ok(buf)
     }
 
-    async fn start(self: Arc<Self>, listen_addr: SocketAddr, client_addr_arg: Option<std::net::SocketAddr>, middleware_addr_arg: Option<std::net::SocketAddr>, bootstrap_arg: Option<SocketAddr>) -> anyhow::Result<()> {
+    async fn start(self: Arc<Self>, listen_addr: SocketAddr) -> anyhow::Result<()> {
         // Start listener with retry
         let listener = loop {
             match TcpListener::bind(listen_addr).await {
@@ -223,12 +212,6 @@ impl NetNode {
                 }
             }
         };
-
-        // remember our listen addr for bootstrap replies
-        {
-            let mut la = self.listen_addr.write().await;
-            *la = Some(listen_addr);
-        }
 
         // ✅ Start stdin input loop (moved here so it actually runs)
         {
@@ -252,8 +235,7 @@ impl NetNode {
                         let commit_index = *input_node.commit_index.read().await;
                         let log = input_node.log.read().await;
 
-                        let peers_map = input_node.peers.read().await;
-                        for (&peer_id, _) in peers_map.iter() {
+                        for (&peer_id, _) in input_node.peers.iter() {
                             let next_index = {
                                 let next_indices = input_node.next_index.read().await;
                                 next_indices.get(&peer_id).copied().unwrap_or(1)
@@ -309,53 +291,8 @@ impl NetNode {
             }
         });
 
-        // If we were started with a bootstrap address, perform a one-shot control-plane handshake
-        if let Some(bootstrap_addr) = bootstrap_arg {
-            info!("Node {} attempting bootstrap handshake with {}", self.id, bootstrap_addr);
-            match TcpStream::connect(bootstrap_addr).await {
-                Ok(stream) => {
-                    let (r, w) = stream.into_split();
-                    let mut writer = FramedWrite::new(w, LengthDelimitedCodec::new());
-                    let mut reader = FramedRead::new(r, LengthDelimitedCodec::new());
-
-                    let join = RaftMessage::NodeJoin { id: self.id, addr: listen_addr.to_string() };
-                    let payload = serde_json::to_vec(&join)?;
-                    if let Err(e) = writer.send(Bytes::from(payload)).await {
-                        error!("Bootstrap send failed: {}", e);
-                    } else {
-                        // Await NodeList reply
-                        if let Some(frame_res) = reader.next().await {
-                            match frame_res {
-                                Ok(frame) => {
-                                    if let Ok(msg) = serde_json::from_slice::<RaftMessage>(&frame.to_vec()) {
-                                        if let RaftMessage::NodeList { peers } = msg {
-                                            info!("Node {} received NodeList with {} entries", self.id, peers.len());
-                                            let mut peers_w = self.peers.write().await;
-                                            for (pid, addr_str) in peers.into_iter() {
-                                                if pid == self.id { continue; }
-                                                if let Ok(sa) = addr_str.parse::<SocketAddr>() {
-                                                    peers_w.insert(pid, sa);
-                                                }
-                                            }
-                                        } else {
-                                            info!("Node {} bootstrap: unexpected reply", self.id);
-                                        }
-                                    }
-                                }
-                                Err(e) => { error!("Bootstrap read error: {}", e); }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Node {} bootstrap connect failed: {}", self.id, e);
-                }
-            }
-        }
-
         // Connect to peers (outbound) with exponential backoff
-        let peers_snapshot = { let r = self.peers.read().await; r.clone() };
-        for (&peer_id, &addr) in peers_snapshot.iter() {
+        for (&peer_id, &addr) in self.peers.iter() {
             let node = self.clone();
             tokio::spawn(async move {
                 let mut backoff = Duration::from_secs(1);
@@ -402,8 +339,7 @@ impl NetNode {
                 let connected: Vec<u32> = current_outbound.keys().cloned().collect();
                 drop(current_outbound);
 
-                let peers_snapshot = { let r = reconnect_node.peers.read().await; r.clone() };
-                for (&peer_id, &addr) in peers_snapshot.iter() {
+                for (&peer_id, &addr) in reconnect_node.peers.iter() {
                     if connected.contains(&peer_id) {
                         continue;
                     }
@@ -440,29 +376,14 @@ impl NetNode {
             }
         });
 
-        // Start client API listener on a port (either provided or default 9000+id)
+        // Start client API listener on a port (9000 + node id)
         let client_node = self.clone();
-        let client_addr_to_use = client_addr_arg.unwrap_or_else(|| {
-            format!("127.0.0.1:{}", 9000 + client_node.id)
-                .parse()
-                .expect("parse client addr")
-        });
         tokio::spawn(async move {
-            if let Err(e) = client_node.run_client_api(client_addr_to_use).await {
+            let client_addr: std::net::SocketAddr = format!("127.0.0.1:{}", 9000 + client_node.id)
+                .parse()
+                .expect("parse client addr");
+            if let Err(e) = client_node.run_client_api(client_addr).await {
                 error!("client API failed: {:?}", e);
-            }
-        });
-
-        // Start middleware listener if provided (or use default 9100+id)
-        let middleware_node = self.clone();
-        let middleware_addr_to_use = middleware_addr_arg.unwrap_or_else(|| {
-            format!("127.0.0.1:{}", 9100 + middleware_node.id)
-                .parse()
-                .expect("parse middleware addr")
-        });
-        tokio::spawn(async move {
-            if let Err(e) = middleware_node.run_middleware(middleware_addr_to_use).await {
-                error!("middleware failed: {:?}", e);
             }
         });
 
@@ -470,48 +391,12 @@ impl NetNode {
     }
 
     async fn handle_inbound(&self, stream: TcpStream) -> anyhow::Result<()> {
-        // Split so we can read frames and reply on the same connection (used for NodeJoin handshake)
-        let (r, w) = stream.into_split();
-        let mut framed_read = FramedRead::new(r, LengthDelimitedCodec::new());
-        let mut framed_write = FramedWrite::new(w, LengthDelimitedCodec::new());
-
-        while let Some(frame_res) = framed_read.next().await {
+        let mut framed = FramedRead::new(stream, LengthDelimitedCodec::new());
+        while let Some(frame_res) = framed.next().await {
             let frame = frame_res?; // BytesMut
             let vec = frame.to_vec();
             if let Ok(msg) = serde_json::from_slice::<RaftMessage>(&vec) {
-                match msg {
-                    RaftMessage::NodeJoin { id, addr } => {
-                        info!("Node {} received NodeJoin from {}@{}", self.id, id, addr);
-
-                        // Build node list (peers + self) but do NOT include the joiner
-                        let mut list: Vec<(u32, String)> = Vec::new();
-                        {
-                            let peers_r = self.peers.read().await;
-                            for (&pid, &paddr) in peers_r.iter() {
-                                list.push((pid, paddr.to_string()));
-                            }
-                        }
-                        if let Some(self_addr) = *self.listen_addr.read().await {
-                            list.push((self.id, self_addr.to_string()));
-                        }
-                        // ensure joiner id is not present
-                        list.retain(|(pid, _)| *pid != id);
-
-                        let reply = RaftMessage::NodeList { peers: list };
-                        let payload = serde_json::to_vec(&reply)?;
-                        framed_write.send(Bytes::from(payload)).await?;
-
-                        // Now add the joiner to our peers map (so future connections will be attempted)
-                        if let Ok(sa) = addr.parse::<SocketAddr>() {
-                            let mut peers_w = self.peers.write().await;
-                            peers_w.insert(id, sa);
-                        }
-                    }
-                    other => {
-                        // Default path for normal raft messages
-                        self.handle_message(other).await;
-                    }
-                }
+                self.handle_message(msg).await;
             }
         }
         Ok(())
@@ -704,12 +589,6 @@ impl NetNode {
                     }
                 }
             }
-            RaftMessage::NodeJoin { id, addr } => {
-                info!("Node {} received NodeJoin in handle_message (unexpected path) from {}@{}", self.id, id, addr);
-            }
-            RaftMessage::NodeList { peers } => {
-                info!("Node {} received NodeList in handle_message (ignoring) with {} entries", self.id, peers.len());
-            }
         }
     }
 
@@ -731,7 +610,7 @@ impl NetNode {
             entry.insert(_sender_id, vote_granted);
             // count granted votes
             let granted_votes = entry.values().filter(|&&v| v).count();
-            let total = { let p = self.peers.read().await; p.len() } + 1;
+            let total = self.peers.len() + 1;
             info!("Node {}: term {} has {} granted votes out of {}", self.id, term, granted_votes, total);
         if granted_votes > total / 2 && matches!(*self.state.read().await, RaftState::Candidate) {
             *self.state.write().await = RaftState::Leader;
@@ -742,16 +621,14 @@ impl NetNode {
             {
                 let mut next_indices = self.next_index.write().await;
                 let mut match_indices = self.match_index.write().await;
-                let peers_snapshot = { let r = self.peers.read().await; r.clone() };
-                for (&peer_id, _) in peers_snapshot.iter() {
+                for (&peer_id, _) in self.peers.iter() {
                     next_indices.insert(peer_id, last_index + 1); // 1-based, points to "next to send"
                     match_indices.insert(peer_id, 0);
                 }
             }
 
             // send initial heartbeat
-            let peers_snapshot = { let r = self.peers.read().await; r.clone() };
-            for (&peer_id, _) in peers_snapshot.iter() {
+            for (&peer_id, _) in self.peers.iter() {
                 let hb = RaftMessage::AppendEntries {
                     term: current_term,
                     leader_id: self.id,
@@ -821,8 +698,7 @@ impl NetNode {
             last_log_term,
         };
 
-        let peers_snapshot = { let r = self.peers.read().await; r.clone() };
-        for (&peer_id, _) in peers_snapshot.iter() {
+        for (&peer_id, _) in self.peers.iter() {
             self.send_message(peer_id, req.clone()).await;
         }
     }
@@ -893,8 +769,7 @@ impl NetNode {
             // Apply any newly committed entries
             self.apply_committed_entries().await;
             
-                let peers_snapshot = { let r = self.peers.read().await; r.clone() };
-                for (&peer_id, _) in peers_snapshot.iter() {
+            for (&peer_id, _) in self.peers.iter() {
                 let next_index = {
                     let next_indices = self.next_index.read().await;
                     next_indices.get(&peer_id).copied().unwrap_or(1)
@@ -984,116 +859,6 @@ impl NetNode {
                 }
             });
         }
-    }
-
-    // Middleware: long-lived, persistent client connections. This acts like the
-    // client API but will transparently forward commands to the current leader
-    // (using `forward_to_leader`) and will retry for a short period so the
-    // client can keep a stable connection even if leadership moves.
-    pub async fn run_middleware(self: Arc<Self>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
-        let listener = TcpListener::bind(addr).await?;
-        info!("🔁 Node {} middleware listening on {}", self.id, addr);
-
-        loop {
-            let (stream, peer_addr) = listener.accept().await?;
-            info!("📡 Node {} accepted middleware client {}", self.id, peer_addr);
-            let node = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = node.handle_middleware_connection(stream).await {
-                    error!("middleware connection error: {:?}", e);
-                }
-            });
-        }
-    }
-
-    async fn handle_middleware_connection(&self, mut stream: TcpStream) -> anyhow::Result<()> {
-        let (r, mut w) = stream.split();
-        let mut reader = BufReader::new(r);
-        let mut line = String::new();
-
-        w.write_all(b"Connected to Cloud P2P middleware.\n").await?;
-        w.write_all(b"You may send: LEADER | REGISTER ... | UNREGISTER ... | LIST | SHOW_USERS | SUBMIT <op_id> <cmd...>\n").await?;
-
-        loop {
-            line.clear();
-            let n = reader.read_line(&mut line).await?;
-            if n == 0 { break; }
-            let cmd = line.trim();
-            if cmd.is_empty() { continue; }
-
-            // If we're leader, handle locally (same logic as handle_client_connection)
-            if matches!(*self.state.read().await, RaftState::Leader) {
-                // reuse existing handling: for simplicity call into the same code paths
-                // We'll mimic the REGISTER / UNREGISTER / SUBMIT leader code paths
-                let mut parts = cmd.split_whitespace();
-                match parts.next() {
-                    Some("LEADER") => {
-                        w.write_all(format!("LEADER {}\n", self.id).as_bytes()).await?;
-                    }
-                    Some("REGISTER") => {
-                        let user = match parts.next() { Some(s) => s.to_string(), None => { w.write_all(b"Usage: REGISTER <user> <ip>\n").await?; continue; } };
-                        let ip = match parts.next() { Some(s) => s.to_string(), None => { w.write_all(b"Usage: REGISTER <user> <ip>\n").await?; continue; } };
-                        let command = format!("REGISTER {} {}", user, ip);
-                        self.append_and_replicate(command).await;
-                        w.write_all(b"OK\n").await?;
-                    }
-                    Some("UNREGISTER") => {
-                        let user = match parts.next() { Some(s) => s.to_string(), None => { w.write_all(b"Usage: UNREGISTER <user>\n").await?; continue; } };
-                        let command = format!("UNREGISTER {}", user);
-                        self.append_and_replicate(command).await;
-                        w.write_all(b"OK\n").await?;
-                    }
-                    Some("LIST") => {
-                        let log = self.log.read().await;
-                        if log.is_empty() { w.write_all(b"(empty)\n").await?; }
-                        else { for e in log.iter() { w.write_all(format!("idx={} term={} cmd={}\n", e.index, e.term, e.command).as_bytes()).await?; } }
-                    }
-                    Some("SHOW_USERS") => {
-                        let users = self.registered_users.read().await;
-                        if users.is_empty() { w.write_all(b"(empty)\n").await?; }
-                        else { for (u, ip) in users.iter() { w.write_all(format!("{} {}\n", u, ip).as_bytes()).await?; } }
-                    }
-                    Some("SUBMIT") => {
-                        let op_id = match parts.next() { Some(s) => s.to_string(), None => { w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?; continue; } };
-                        let rest = parts.collect::<Vec<_>>().join(" ");
-                        if rest.is_empty() { w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?; continue; }
-                        { let mut seen = self.processed_ops.write().await; seen.insert(op_id); }
-                        self.append_and_replicate(rest).await;
-                        w.write_all(b"OK\n").await?;
-                    }
-                    Some(unknown) => { w.write_all(format!("ERR unknown command: {}\n", unknown).as_bytes()).await?; }
-                    None => {}
-                }
-                continue;
-            }
-
-            // Not leader: transparently forward to leader, retrying for some time
-            let mut total_wait = Duration::from_secs(0);
-            let timeout = Duration::from_secs(15);
-            let mut forwarded = None;
-            while total_wait < timeout {
-                match self.forward_to_leader(cmd).await {
-                    Ok(reply) => { forwarded = Some(reply); break; }
-                    Err(_) => {
-                        sleep(Duration::from_millis(500)).await;
-                        total_wait += Duration::from_millis(500);
-                    }
-                }
-            }
-
-            if let Some(reply) = forwarded {
-                w.write_all(reply.as_bytes()).await?;
-            } else {
-                // give a redirect if we know a leader, otherwise not-leader
-                if let Some(lid) = *self.leader_hint.read().await {
-                    let addr = NetNode::client_addr_for(lid);
-                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
-                } else {
-                    w.write_all(b"NOT_LEADER\n").await?;
-                }
-            }
-        }
-        Ok(())
     }
 
     async fn handle_client_connection(&self, mut stream: TcpStream) -> anyhow::Result<()> {
@@ -1293,8 +1058,7 @@ impl NetNode {
         let commit_index = *self.commit_index.read().await;
         let log_snapshot = self.log.read().await;
 
-        let peers_snapshot = { let r = self.peers.read().await; r.clone() };
-        for (&peer_id, _) in peers_snapshot.iter() {
+        for (&peer_id, _) in self.peers.iter() {
             let next_index = {
                 let next_indices = self.next_index.read().await;
                 next_indices.get(&peer_id).copied().unwrap_or(1)
@@ -1336,13 +1100,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let listen: SocketAddr = args.addr.parse()?;
-    // parse client and middleware addresses from CLI args
-    let client_addr = args.client_addr.parse::<SocketAddr>().ok();
-    let middleware_addr = args.middleware_addr.parse::<SocketAddr>().ok();
-
     let node = Arc::new(NetNode::new(args.id, peers_map));
-    let bootstrap_addr = args.bootstrap.and_then(|s| s.parse::<SocketAddr>().ok());
-    node.clone().start(listen, client_addr, middleware_addr, bootstrap_addr).await?;
+    node.clone().start(listen).await?;
     // keep alive
     loop { sleep(Duration::from_secs(3600)).await; }
 }

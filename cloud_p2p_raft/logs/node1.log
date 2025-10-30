@@ -7,180 +7,255 @@ warning: unused import: `self`
    = note: `#[warn(unused_imports)]` on by default
 
 warning: `cloud_p2p_raft` (bin "node") generated 1 warning (run `cargo fix --bin "node"` to apply 1 suggestion)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
-     Running `target/debug/node --id 1 --addr '127.0.0.1:7001' --peers '2=127.0.0.1:7002,3=127.0.0.1:7003' --client-addr '127.0.0.1:9001' --middleware-addr '127.0.0.1:9101'`
-[2m2025-10-30T12:06:58.556079Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 listening on 127.0.0.1:7001
-[2m2025-10-30T12:06:58.556620Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 3 at 127.0.0.1:7003
-[2m2025-10-30T12:06:58.556800Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
-[2m2025-10-30T12:06:58.556876Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 connected to peer 3 at 127.0.0.1:7003
-[2m2025-10-30T12:06:58.556973Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 🔁 Node 1 middleware listening on 127.0.0.1:9101
-[2m2025-10-30T12:06:58.556984Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 connected to peer 2 at 127.0.0.1:7002
-[2m2025-10-30T12:06:58.557007Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 🌐 Node 1 client API listening on 127.0.0.1:9001
-[2m2025-10-30T12:06:58.564289Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 accepted connection from 127.0.0.1:56870
-[2m2025-10-30T12:06:58.594207Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 3, 0 entries)
-[2m2025-10-30T12:06:58.639921Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 accepted connection from 127.0.0.1:56871
-[2m2025-10-30T12:06:59.096087Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 3, 0 entries)
-[2m2025-10-30T12:06:59.597341Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 3, 0 entries)
-[2m2025-10-30T12:07:00.084711Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 4
-[2m2025-10-30T12:07:02.231130Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.141602583s, starting election
-[2m2025-10-30T12:07:02.231274Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 5
-[2m2025-10-30T12:07:02.307411Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote reply from 3 (granted: true)
-[2m2025-10-30T12:07:02.307491Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1: term 5 has 2 granted votes out of 3
-[2m2025-10-30T12:07:02.332977Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 became leader for term 5
-[2m2025-10-30T12:07:02.333422Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:02.333471Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:02.333682Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 accepted connection from 127.0.0.1:56872
-[2m2025-10-30T12:07:02.430668Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 5
-[2m2025-10-30T12:07:02.574153Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:02.574281Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:02.574538Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:02.574597Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:03.076537Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:03.076536Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:03.076636Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:03.076641Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:03.577651Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:03.577651Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:03.577747Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:03.577757Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:04.079849Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:04.079837Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:04.079937Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:04.079947Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:04.581689Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:04.581689Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:04.581780Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:04.581788Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:05.083835Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:05.083920Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:05.084009Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:05.084060Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:05.390017Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 6
-[2m2025-10-30T12:07:07.723289Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 7
-[2m2025-10-30T12:07:07.825510Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 7, 0 entries)
-[2m2025-10-30T12:07:07.998605Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 7, 0 entries)
-[2m2025-10-30T12:07:08.142292Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 7
-[2m2025-10-30T12:07:08.500850Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 7, 0 entries)
-[2m2025-10-30T12:07:09.004749Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 7, 0 entries)
-[2m2025-10-30T12:07:09.506116Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 7, 0 entries)
-[2m2025-10-30T12:07:10.008339Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 7, 0 entries)
-[2m2025-10-30T12:07:10.510671Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 7, 0 entries)
-[2m2025-10-30T12:07:10.689673Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 8
-[2m2025-10-30T12:07:12.916130Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 3 for term 9
-[2m2025-10-30T12:07:13.017805Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 9, 0 entries)
-[2m2025-10-30T12:07:13.115975Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 9, 0 entries)
-[2m2025-10-30T12:07:13.446894Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 9
-[2m2025-10-30T12:07:13.618182Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 9, 0 entries)
-[2m2025-10-30T12:07:14.120798Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 9, 0 entries)
-[2m2025-10-30T12:07:14.623031Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 9, 0 entries)
-[2m2025-10-30T12:07:15.127217Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 9, 0 entries)
-[2m2025-10-30T12:07:15.628788Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 9, 0 entries)
-[2m2025-10-30T12:07:15.691831Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 10
-[2m2025-10-30T12:07:17.731649Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 11
-[2m2025-10-30T12:07:20.113320Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.347051166s, starting election
-[2m2025-10-30T12:07:20.113434Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 12
-[2m2025-10-30T12:07:20.120441Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote reply from 2 (granted: true)
-[2m2025-10-30T12:07:20.120565Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1: term 12 has 2 granted votes out of 3
-[2m2025-10-30T12:07:20.207953Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote reply from 3 (granted: true)
-[2m2025-10-30T12:07:20.216009Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 became leader for term 12
-[2m2025-10-30T12:07:20.216495Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:20.216543Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:20.216594Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:20.216627Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:20.400956Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:20.401006Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:20.401003Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:20.401041Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:20.794974Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 12
-[2m2025-10-30T12:07:20.903493Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:20.903541Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:20.903588Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:20.903612Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:21.404690Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:21.404732Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:21.405494Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:21.405573Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:21.906731Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:21.906872Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:21.906753Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:21.906964Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:22.408666Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:22.408666Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:22.408750Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:22.408770Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:22.911435Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:22.911435Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:22.911562Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:22.911602Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:23.413487Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:23.413614Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:23.413487Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:23.413660Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:23.446595Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 13
-[2m2025-10-30T12:07:25.725982Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 14
-[2m2025-10-30T12:07:25.828747Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 14, 0 entries)
-[2m2025-10-30T12:07:26.066818Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 14, 0 entries)
-[2m2025-10-30T12:07:26.200736Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 14
-[2m2025-10-30T12:07:26.569029Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 14, 0 entries)
-[2m2025-10-30T12:07:27.071205Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 14, 0 entries)
-[2m2025-10-30T12:07:27.573916Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 14, 0 entries)
-[2m2025-10-30T12:07:28.076169Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 14, 0 entries)
-[2m2025-10-30T12:07:28.577945Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 14, 0 entries)
-[2m2025-10-30T12:07:28.752555Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 15
-[2m2025-10-30T12:07:31.018318Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 3 for term 16
-[2m2025-10-30T12:07:31.119499Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 16, 0 entries)
-[2m2025-10-30T12:07:31.338432Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 16, 0 entries)
-[2m2025-10-30T12:07:31.711173Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 16
-[2m2025-10-30T12:07:31.840333Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 16, 0 entries)
-[2m2025-10-30T12:07:32.342671Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 16, 0 entries)
-[2m2025-10-30T12:07:32.844953Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 16, 0 entries)
-[2m2025-10-30T12:07:33.346819Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 16, 0 entries)
-[2m2025-10-30T12:07:33.848744Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 3 (term 16, 0 entries)
-[2m2025-10-30T12:07:34.057834Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 17
-[2m2025-10-30T12:07:36.677677Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.546169208s, starting election
-[2m2025-10-30T12:07:36.677792Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 18
-[2m2025-10-30T12:07:36.695965Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote reply from 2 (granted: true)
-[2m2025-10-30T12:07:36.696072Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1: term 18 has 2 granted votes out of 3
-[2m2025-10-30T12:07:36.780344Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 became leader for term 18
-[2m2025-10-30T12:07:36.780350Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote reply from 3 (granted: true)
-[2m2025-10-30T12:07:36.780694Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:36.780730Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:36.780779Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:36.780802Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:36.915636Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 18
-[2m2025-10-30T12:07:36.964473Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:36.964473Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:36.964528Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:36.964536Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:37.466774Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:37.466774Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:37.466856Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:37.466888Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:37.969349Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:37.969349Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:37.969481Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:37.969546Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:38.471626Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:38.471626Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:38.471755Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:38.471814Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:38.973780Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:38.973878Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:38.974003Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:38.974053Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:39.475956Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:39.475956Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:39.475996Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:39.476011Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:39.567308Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 19
-[2m2025-10-30T12:07:42.017724Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 20
-eceived AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:38.973878Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:38.974003Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:38.974053Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:39.475956Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
-[2m2025-10-30T12:07:39.475956Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 2 (success: true)
-[2m2025-10-30T12:07:39.475996Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
-[2m2025-10-30T12:07:39.476011Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 2 to 0
-[2m2025-10-30T12:07:39.567308Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 19
-[2m2025-10-30T12:07:42.017724Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 4 for term 20
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running `target/debug/node --id 1 --addr '127.0.0.1:7001' --peers '2=127.0.0.1:7002,3=127.0.0.1:7003'`
+[2m2025-10-29T23:39:05.119791Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 listening on 127.0.0.1:7001
+[2m2025-10-29T23:39:05.120125Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
+[2m2025-10-29T23:39:05.120144Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 3 at 127.0.0.1:7003
+[2m2025-10-29T23:39:05.120269Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 🌐 Node 1 client API listening on 127.0.0.1:9001
+[2m2025-10-29T23:39:05.120447Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 connected to peer 2 at 127.0.0.1:7002
+[2m2025-10-29T23:39:05.120465Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 3 at 127.0.0.1:7003 failed: Connection refused (os error 61). Retrying in 1s...
+[2m2025-10-29T23:39:06.122428Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 3 at 127.0.0.1:7003
+[2m2025-10-29T23:39:06.122660Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 3 at 127.0.0.1:7003 failed: Connection refused (os error 61). Retrying in 2s...
+[2m2025-10-29T23:39:06.213188Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 accepted connection from 127.0.0.1:60470
+[2m2025-10-29T23:39:07.442942Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 2 for term 12
+[2m2025-10-29T23:39:07.545045Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:07.856276Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:08.123753Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 3 at 127.0.0.1:7003
+[2m2025-10-29T23:39:08.124062Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 3 at 127.0.0.1:7003 failed: Connection refused (os error 61). Retrying in 4s...
+[2m2025-10-29T23:39:08.302102Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 accepted connection from 127.0.0.1:60475
+[2m2025-10-29T23:39:08.357824Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:08.859594Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:09.360814Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:09.861726Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:10.122816Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 3, retrying...
+[2m2025-10-29T23:39:10.123215Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 reconnected to 3
+[2m2025-10-29T23:39:10.363499Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:10.864404Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:11.354161Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote request from 3 for term 1
+[2m2025-10-29T23:39:11.366047Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:11.868848Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:12.014168Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 📡 Node 1 accepted client connection from 127.0.0.1:60478
+[2m2025-10-29T23:39:12.126700Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 3 at 127.0.0.1:7003
+[2m2025-10-29T23:39:12.127201Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 connected to peer 3 at 127.0.0.1:7003
+[2m2025-10-29T23:39:12.370267Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:12.872269Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:13.373774Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:13.875577Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:14.250122Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 📡 Node 1 accepted client connection from 127.0.0.1:60483
+[2m2025-10-29T23:39:14.377750Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:14.879302Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:15.380918Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:15.882318Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:16.384057Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:16.684009Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 📡 Node 1 accepted client connection from 127.0.0.1:60485
+[2m2025-10-29T23:39:16.885923Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:17.387712Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:17.889017Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:18.391609Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:18.893500Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:19.395528Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:19.897943Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendEntries from 2 (term 12, 0 entries)
+[2m2025-10-29T23:39:22.208972Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 election timeout after 2.310951364s, starting election
+[2m2025-10-29T23:39:22.209029Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 starting election for term 13
+[2m2025-10-29T23:39:22.236092Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received vote reply from 3 (granted: true)
+[2m2025-10-29T23:39:22.236209Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1: term 13 has 2 granted votes out of 3
+[2m2025-10-29T23:39:22.311149Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 became leader for term 13
+[2m2025-10-29T23:39:22.311462Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Outbound connection 1 -> 2 failed: Broken pipe (os error 32)
+[2m2025-10-29T23:39:22.311523Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
+[2m2025-10-29T23:39:22.311791Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:22.311819Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 1s...
+[2m2025-10-29T23:39:22.311858Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:22.417251Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 📡 Node 1 accepted client connection from 127.0.0.1:60488
+[2m2025-10-29T23:39:22.677842Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:22.677904Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:23.180328Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:23.180390Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:23.313183Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
+[2m2025-10-29T23:39:23.313429Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 2s...
+[2m2025-10-29T23:39:23.681179Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:23.681241Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:23.832836Z[0m [32m INFO[0m [2mnode[0m[2m:[0m 📡 Node 1 accepted client connection from 127.0.0.1:60490
+[2m2025-10-29T23:39:24.183381Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:24.183473Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:24.685294Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:24.685394Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:25.128888Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-29T23:39:25.187117Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:25.187183Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:25.314840Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
+[2m2025-10-29T23:39:25.315216Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 4s...
+[2m2025-10-29T23:39:25.689285Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:25.689383Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:26.190088Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:26.190134Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:26.691106Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:26.691149Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:27.192857Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:27.192905Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:27.694633Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:27.694685Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:28.197183Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:28.197245Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:28.699714Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:28.699795Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:29.201286Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:29.201348Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:29.317242Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
+[2m2025-10-29T23:39:29.317513Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 8s...
+[2m2025-10-29T23:39:29.702285Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:29.702326Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:30.130525Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-29T23:39:30.203604Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:30.203789Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:30.704348Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:30.704395Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:31.205393Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:31.205444Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:31.707222Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:31.707274Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:32.208662Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:32.208706Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:32.711199Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:32.711263Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:33.211873Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:33.211920Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:33.714192Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:33.714279Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:34.215275Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:34.215341Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:34.716950Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:34.717026Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:35.132111Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-29T23:39:35.219142Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:35.219251Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:35.721391Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:35.721496Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:36.223586Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:36.223694Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:36.724098Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:36.724216Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:37.225796Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:37.225892Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:37.319343Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
+[2m2025-10-29T23:39:37.319748Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 16s...
+[2m2025-10-29T23:39:37.726582Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:37.726645Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:38.228337Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:38.228395Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:38.730282Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:38.730344Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:39.232290Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:39.232342Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:39.733294Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:39.733353Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:40.133951Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-29T23:39:40.235213Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:40.235274Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:40.736624Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:40.736670Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:41.238855Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:41.238952Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:41.739747Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:41.739817Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:42.241262Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:42.241343Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:42.742278Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:42.742327Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:43.243782Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:43.243841Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:43.746629Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:43.746781Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:44.248221Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:44.248268Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:44.750072Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:44.750176Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:45.135196Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-29T23:39:45.251799Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:45.251846Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:45.754417Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:45.754462Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:46.255152Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:46.255249Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:46.755973Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:46.756020Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:47.258680Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:47.258724Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:47.760747Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:47.760792Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:48.263732Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:48.263841Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:48.765603Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:48.765666Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:49.267386Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:49.267447Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:49.769080Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:49.769157Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:50.137063Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-29T23:39:50.270877Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:50.270937Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:50.772459Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:50.772504Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:51.274194Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:51.274255Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:51.776490Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:51.776560Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:52.278165Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:52.278209Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:52.781079Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:52.781188Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:53.283471Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:53.283566Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:53.321615Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 attempting to connect to peer 2 at 127.0.0.1:7002
+[2m2025-10-29T23:39:53.321813Z[0m [31mERROR[0m [2mnode[0m[2m:[0m Connect to peer 2 at 127.0.0.1:7002 failed: Connection refused (os error 61). Retrying in 30s...
+[2m2025-10-29T23:39:53.784917Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:53.785012Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:54.286694Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:54.286803Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:54.787906Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:54.787966Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:55.138678Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-29T23:39:55.289406Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:55.289469Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:55.790828Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:55.790934Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:56.291855Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:56.291952Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:56.793391Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:56.793497Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:57.294245Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:57.294306Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:57.795292Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:57.795342Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:58.297237Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:58.297305Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:58.798893Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:58.799033Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:59.299670Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:59.299771Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:39:59.801144Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:39:59.801207Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:00.140600Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-29T23:40:00.303777Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:00.303837Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:00.805656Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:00.805719Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:01.307314Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:01.307385Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:01.808996Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:01.809056Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:02.310842Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:02.310904Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:02.812503Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:02.812577Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:03.314795Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:03.314850Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:03.818135Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:03.818246Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:04.319720Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:04.319830Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:04.820366Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:04.820441Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
+[2m2025-10-29T23:40:05.142283Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 detected missing connection to 2, retrying...
+[2m2025-10-29T23:40:05.322615Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 received AppendReply from 3 (success: true)
+[2m2025-10-29T23:40:05.322676Z[0m [32m INFO[0m [2mnode[0m[2m:[0m Node 1 updated indices for 3 to 0
