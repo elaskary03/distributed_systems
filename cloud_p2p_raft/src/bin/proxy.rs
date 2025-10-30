@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
-use cloud_p2p_raft::data_structures::Command; // Updated import path to use the library root
+use cloud_p2p_raft::data_structures::Command;
 use rand::{distributions::Alphanumeric, Rng};
-use std::{net::SocketAddr, str::FromStr, time::Duration};
+use std::{fs, net::SocketAddr, str::FromStr, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -30,6 +30,18 @@ struct Args {
     /// Initial backoff in ms
     #[arg(long, default_value_t = 150)]
     backoff_ms: u64,
+
+    /// Command to execute (e.g., SendPhoto)
+    #[arg(long)]
+    command: Option<String>,
+
+    /// Path to the photo file
+    #[arg(long)]
+    photo_path: Option<String>,
+
+    /// ID of the target node
+    #[arg(long)]
+    target_node: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -53,23 +65,52 @@ async fn main() -> anyhow::Result<()> {
     println!("🔗 Proxy listening on {}", listen_addr);
     println!("   Using seeds: {:?}", seeds);
 
-    loop {
-        let (stream, peer) = listener.accept().await?;
-        println!("📡 client connected: {}", peer);
+    // If command-line arguments for command, photo_path, and target_node are provided, execute the command immediately
+    if let Some(command) = args.command {
+        match command.as_str() {
+            "SendPhoto" => {
+                let photo_path = args.photo_path.as_deref().unwrap_or("");
+                let target_node = args.target_node.as_deref().unwrap_or("");
 
-        let seeds = seeds.clone();
-        let cfg = ProxyCfg {
-            first_try: args.first_try,
-            max_retries: args.max_retries,
-            backoff_ms: args.backoff_ms,
-        };
+                // Read the photo file
+                let photo_data = fs::read(photo_path).expect("Failed to read photo file");
 
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, seeds, cfg).await {
-                eprintln!("client handler error: {e:?}");
+                // Create the SendPhoto command
+                let photo_id = "test_photo".to_string(); // Generate a unique ID in a real implementation
+                let command = Command::SendPhoto {
+                    photo_id,
+                    photo_data,
+                };
+
+                // Forward the command to the target node
+                forward_command_to_node(command, target_node).await?;
             }
-        });
+            _ => {
+                eprintln!("Unsupported command: {}", command);
+            }
+        }
+    } else {
+        // Regular proxy operation
+        loop {
+            let (stream, peer) = listener.accept().await?;
+            println!("📡 client connected: {}", peer);
+
+            let seeds = seeds.clone();
+            let cfg = ProxyCfg {
+                first_try: args.first_try,
+                max_retries: args.max_retries,
+                backoff_ms: args.backoff_ms,
+            };
+
+            tokio::spawn(async move {
+                if let Err(e) = handle_client(stream, seeds, cfg).await {
+                    eprintln!("client handler error: {e:?}");
+                }
+            });
+        }
     }
+
+    Ok(())
 }
 
 struct ProxyCfg {
@@ -443,4 +484,11 @@ fn now_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+async fn forward_command_to_node(command: Command, target_node: &str) -> anyhow::Result<()> {
+    // Serialize and send the command to the target node
+    println!("Forwarding {:?} to node {}", command, target_node);
+    // Add networking logic here
+    Ok(())
 }
