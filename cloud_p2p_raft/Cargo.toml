@@ -23,7 +23,7 @@ thiserror = "1"
 
 [[bin]]
 name = "gui"
-path = "src/gui.rs"
+path = "src/bin/gui.rs"
 
 [[bin]]
 name = "proxy"

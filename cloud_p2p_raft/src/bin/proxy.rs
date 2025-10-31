@@ -339,7 +339,6 @@ async fn read_multiline(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<Stri
     w.write_all(cmd_line.as_bytes()).await?;
     w.write_all(b"\n").await?;
 
-    // We don't know number of lines; read with small delay until idle.
     let mut out = String::new();
     loop {
         let mut buf = String::new();
@@ -348,16 +347,13 @@ async fn read_multiline(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<Stri
                 let n = n?;
                 if n == 0 { break; }
                 out.push_str(&buf);
-                // For nodes that print just one line (e.g., "(empty)\n"), we can break when it looks done.
-                if cmd_line == "LEADER" || cmd_line == "LIST" || cmd_line == "SHOW_USERS" {
-                    // Heuristic: if we got one or more lines and the next read would hang, caller can live with the partial.
-                    // We'll rely on client to close or keep reading; here we return what we got immediately.
-                    // (Nodes currently write all lines in a burst.)
-                    if !buf.is_empty() { break; }
+                // Only LEADER is guaranteed single-line; keep it snappy.
+                if cmd_line == "LEADER" {
+                    break;
                 }
             }
             _ = sleep(Duration::from_millis(100)) => {
-                // brief idle; return what we have
+                // brief idle; assume node finished writing
                 break;
             }
         }
