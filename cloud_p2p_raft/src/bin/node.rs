@@ -749,34 +749,41 @@ impl NetNode {
                         if let (Some(_id), Some(passphrase), Some(input_path), Some(output_path)) =
                             (parts.next(), parts.next(), parts.next(), parts.next())
                         {
-                            match tokio::fs::read(input_path).await {
-                                Ok(img_bytes) => {
-                                    match encrypt_and_embed_to_png(
-                                        passphrase.as_bytes(),
-                                        &img_bytes, // plaintext: user's image
-                                        &img_bytes, // cover: same image
-                                    ) {
-                                        Ok((stego_bytes, sha, count)) => {
-                                            if let Some(parent) = Path::new(output_path).parent() {
-                                                if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                                                    error!("Node {}: create_dir_all {:?} failed: {:?}", self.id, parent, e);
-                                                    return; // skip saving on error
+                        match tokio::fs::read(&input_path).await {
+                            Ok(plaintext_bytes) => {
+                                // <- your always-on cover file
+                                let cover_path = "images/cover_image.PNG";
+                                match tokio::fs::read(cover_path).await {
+                                    Ok(cover_bytes) => {
+                                        match encrypt_and_embed_to_png(
+                                            passphrase.as_bytes(),
+                                            &plaintext_bytes,   // plaintext = the user's image
+                                            &cover_bytes,       // cover     = the constant cover image
+                                        ) {
+                                            Ok((stego_bytes, sha, count)) => {
+                                                if let Some(parent) = Path::new(&output_path).parent() {
+                                                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                                                        error!("Node {}: create_dir_all {:?} failed: {:?}", self.id, parent, e);
+                                                        continue;
+                                                    }
+                                                }
+                                                if let Err(e) = tokio::fs::write(&output_path, &stego_bytes).await {
+                                                    error!("Node {}: failed to save stego image {}: {:?}", self.id, output_path, e);
+                                                } else {
+                                                    info!(
+                                                        "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
+                                                        self.id, input_path, output_path, count, sha
+                                                    );
                                                 }
                                             }
-                                            if let Err(e) = tokio::fs::write(output_path, &stego_bytes).await {
-                                                error!("Node {}: failed to save stego image {}: {:?}", self.id, output_path, e);
-                                            } else {
-                                                info!(
-                                                    "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
-                                                    self.id, input_path, output_path, count, sha
-                                                );
-                                            }
+                                            Err(e) => error!("Node {}: encryption/embed failed: {:?}", self.id, e),
                                         }
-                                        Err(e) => error!("Node {}: encryption/embed failed: {:?}", self.id, e),
                                     }
+                                    Err(e) => error!("Node {}: failed to read cover image {}: {:?}", self.id, cover_path, e),
                                 }
-                                Err(e) => error!("Node {}: failed to read {}: {:?}", self.id, input_path, e),
                             }
+                            Err(e) => error!("Node {}: failed to read {}: {:?}", self.id, input_path, e),
+                        }
                         } else {
                             error!("Node {}: malformed ENCRYPT_IMAGE command '{}'", self.id, entry.command);
                         }
