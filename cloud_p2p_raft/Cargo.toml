@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# --- existing deps you already had ---
+# --- core async/runtime/deps ---
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -21,20 +21,22 @@ hyper = "1"
 tower = "0.5"
 thiserror = "1"
 
-# --- GUI additions (safe to add; won’t break existing behavior) ---
-# Enable multipart extraction for file uploads.
+# --- GUI additions ---
+# Web framework with multipart upload support
 axum = { version = "0.7", features = ["multipart"] }
-# Static file serving for /files/uploads and /files/stego.
+# Static file serving for uploads/stego directories
 tower-http = { version = "0.5", features = ["fs"] }
 
-# Image processing (PNG/JPEG/BMP) for stego I/O.
+# --- Crypto & Stego (shared between GUI + Node) ---
 image = { version = "0.24", default-features = false, features = ["png", "jpeg", "bmp"] }
-
-# Crypto for encrypting the uploaded bytes before embedding.
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 sha2 = "0.10"
 rand_core = "0.6"
 hex = "0.4"
+
+[lib]
+name = "cloud_p2p_raft"
+path = "src/lib.rs"
 
 [[bin]]
 name = "gui"
@@ -43,3 +45,7 @@ path = "src/bin/gui.rs"
 [[bin]]
 name = "proxy"
 path = "src/bin/proxy.rs"
+
+[[bin]]
+name = "node"
+path = "src/bin/node.rs"

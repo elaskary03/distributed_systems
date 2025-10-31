@@ -10,7 +10,9 @@ use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
 use tracing::{debug, info, error};
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
+use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -742,6 +744,43 @@ impl NetNode {
                                 info!("Node {}: Malformed UNREGISTER command '{}'", self.id, entry.command);
                             }
                         }
+                        Some("ENCRYPT_IMAGE") => {
+                        // ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
+                        if let (Some(_id), Some(passphrase), Some(input_path), Some(output_path)) =
+                            (parts.next(), parts.next(), parts.next(), parts.next())
+                        {
+                            match tokio::fs::read(input_path).await {
+                                Ok(img_bytes) => {
+                                    match encrypt_and_embed_to_png(
+                                        passphrase.as_bytes(),
+                                        &img_bytes, // plaintext: user's image
+                                        &img_bytes, // cover: same image
+                                    ) {
+                                        Ok((stego_bytes, sha, count)) => {
+                                            if let Some(parent) = Path::new(output_path).parent() {
+                                                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                                                    error!("Node {}: create_dir_all {:?} failed: {:?}", self.id, parent, e);
+                                                    return; // skip saving on error
+                                                }
+                                            }
+                                            if let Err(e) = tokio::fs::write(output_path, &stego_bytes).await {
+                                                error!("Node {}: failed to save stego image {}: {:?}", self.id, output_path, e);
+                                            } else {
+                                                info!(
+                                                    "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
+                                                    self.id, input_path, output_path, count, sha
+                                                );
+                                            }
+                                        }
+                                        Err(e) => error!("Node {}: encryption/embed failed: {:?}", self.id, e),
+                                    }
+                                }
+                                Err(e) => error!("Node {}: failed to read {}: {:?}", self.id, input_path, e),
+                            }
+                        } else {
+                            error!("Node {}: malformed ENCRYPT_IMAGE command '{}'", self.id, entry.command);
+                        }
+                    }
                         Some(other) => {
                             info!("Node {}: Unknown command '{}'", self.id, other);
                         }
@@ -867,7 +906,7 @@ impl NetNode {
         let mut line = String::new();
 
         w.write_all(b"Welcome to Cloud P2P Node API!\n").await?;
-        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST | SHOW_USERS | SUBMIT <op_id> <command...>\n").await?;
+        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST | SHOW_USERS | SUBMIT <op_id> <command...> | ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
 
         loop {
             line.clear();
@@ -981,56 +1020,81 @@ impl NetNode {
                         }
                     }
                 }
-
-                                Some("SUBMIT") => {
-                    // Usage: SUBMIT <op_id> <command...>
-                    let op_id = match parts.next() {
-                        Some(s) => s.to_string(),
-                        None => {
-                            w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?;
-                            continue;
-                        }
-                    };
-                    let rest = parts.collect::<Vec<_>>().join(" ");
-                    if rest.is_empty() {
+                Some("SUBMIT") => {
+                // Usage: SUBMIT <op_id> <command...>
+                let op_id = match parts.next() {
+                    Some(s) => s.to_string(),
+                    None => {
                         w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?;
                         continue;
                     }
+                };
+                let rest = parts.collect::<Vec<_>>().join(" ");
+                if rest.is_empty() {
+                    w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?;
+                    continue;
+                }
 
-                    // Idempotency: if we've seen this op_id, acknowledge
-                    {
-                        let seen = self.processed_ops.read().await;
-                        if seen.contains(&op_id) {
-                            w.write_all(b"OK\n").await?;
-                            continue;
-                        }
-                    }
-
-                    let is_leader = matches!(*self.state.read().await, RaftState::Leader);
-                    if !is_leader {
-                        if let Some(lid) = *self.leader_hint.read().await {
-                            let addr = NetNode::client_addr_for(lid);
-                            w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
-                        } else {
-                            w.write_all(b"NOT_LEADER\n").await?;
-                        }
+                // Idempotency: if we've seen this op_id, acknowledge
+                {
+                    let seen = self.processed_ops.read().await;
+                    if seen.contains(&op_id) {
+                        w.write_all(b"OK\n").await?;
                         continue;
                     }
+                }
 
-                    // Leader path: mark op_id seen, then append+replicate the payload
-                    {
-                        let mut seen = self.processed_ops.write().await;
-                        seen.insert(op_id);
+                let is_leader = matches!(*self.state.read().await, RaftState::Leader);
+                if !is_leader {
+                    if let Some(lid) = *self.leader_hint.read().await {
+                        let addr = NetNode::client_addr_for(lid);
+                        w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                    } else {
+                        w.write_all(b"NOT_LEADER\n").await?;
                     }
-                    self.append_and_replicate(rest).await;
-                    w.write_all(b"OK\n").await?;
+                    continue;
                 }
 
-
-                Some(unknown) => {
-                    let s = format!("ERR unknown command: {}\n", unknown);
-                    w.write_all(s.as_bytes()).await?;
+                // Leader path: mark op_id seen, then append+replicate the payload
+                {
+                    let mut seen = self.processed_ops.write().await;
+                    seen.insert(op_id);
                 }
+                self.append_and_replicate(rest).await;
+                w.write_all(b"OK\n").await?;
+            }
+
+            Some("ENCRYPT_IMAGE") => {
+                if !is_leader {
+                    if let Some(lid) = *self.leader_hint.read().await {
+                        let addr = NetNode::client_addr_for(lid);
+                        w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                    } else {
+                        w.write_all(b"NOT_LEADER\n").await?;
+                    }
+                    continue;
+                }
+
+                // Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
+                let id = parts.next().unwrap_or_default().to_string();
+                let passphrase = parts.next().unwrap_or_default().to_string();
+                let input_path = parts.next().unwrap_or_default().to_string();
+                let output_path = parts.next().unwrap_or_default().to_string();
+
+                if id.is_empty() || passphrase.is_empty() || input_path.is_empty() || output_path.is_empty() {
+                    w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
+                    continue;
+                }
+
+                let command = format!("ENCRYPT_IMAGE {} {} {} {}", id, passphrase, input_path, output_path);
+                self.append_and_replicate(command).await;
+                w.write_all(b"OK\n").await?;
+            }
+
+            Some(unknown) => {
+                let s = format!("ERR unknown command: {}\n", unknown);
+                w.write_all(s.as_bytes()).await?;
+            }
 
                 None => {}
             }

@@ -1,6 +1,12 @@
 use clap::{Parser, ValueEnum};
 use rand::{distributions::Alphanumeric, Rng};
-use std::{net::SocketAddr, str::FromStr, time::Duration};
+use std::{
+    net::SocketAddr,
+    str::FromStr,
+    time::Duration,
+    fs,
+    path::Path,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -84,7 +90,7 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
 
     // Present a simple banner (your proxy protocol)
     w.write_all(b"Welcome to Cloud P2P Proxy!\n").await?;
-    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER\n").await?;
+    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output>\n").await?;
 
     loop {
         line.clear();
@@ -154,6 +160,64 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
                 }
             }
 
+            "ENCRYPT_IMAGE" => {
+            // Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
+            let id = match parts.next() {
+                Some(x) => x,
+                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+            };
+            let pass = match parts.next() {
+                Some(x) => x,
+                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+            };
+            let input_path = match parts.next() {
+                Some(x) => x,
+                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+            };
+            let output_path = match parts.next() {
+                Some(x) => x,
+                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+            };
+
+            let op_id = next_op_id();
+            let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}", op_id, id, pass, input_path, output_path);
+            let resp = submit_idempotent(&seeds, &cfg, &payload).await;
+            write_line(&mut w, resp).await?;
+            }
+
+            "ENCRYPT_ON_CLOUD" => {
+            // Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>
+            let image_id = match parts.next() {
+                Some(x) if !x.is_empty() => x,
+                _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n").await?; continue; }
+            };
+            let pass = match parts.next() {
+                Some(x) => x,
+                _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n").await?; continue; }
+            };
+
+            // Find the uploaded file saved by the GUI (pattern: uploads/<image_id>-<original_name>)
+            let input_path = match find_upload_by_prefix("uploads", image_id) {
+                Ok(p) => p,
+                Err(e) => {
+                    w.write_all(format!("ERR input not found: {}\n", e).as_bytes()).await?;
+                    continue;
+                }
+            };
+
+            // Output goes to stego/<image_id>.png (uniform & predictable)
+            let output_path = format!("stego/{}.png", image_id);
+            if let Some(parent) = Path::new(&output_path).parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+
+            let op_id = next_op_id();
+            let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}",
+                op_id, image_id, pass, input_path, output_path);
+
+            let resp = submit_idempotent(&seeds, &cfg, &payload).await;
+            write_line(&mut w, resp).await?;
+        }
             _ => {
                 w.write_all(format!("ERR unknown command: {}\n", cmd).as_bytes()).await?;
             }
@@ -413,4 +477,19 @@ fn now_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn find_upload_by_prefix(dir: &str, image_id_prefix: &str) -> anyhow::Result<String> {
+    let mut chosen: Option<String> = None;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        // GUI saves as "<image_id>-<sanitized-filename>"
+        if name.starts_with(&format!("{}-", image_id_prefix)) {
+            let p = entry.path().to_string_lossy().to_string();
+            chosen = Some(p);
+            break;
+        }
+    }
+    chosen.ok_or_else(|| anyhow::anyhow!("no file starting with '{}-'", image_id_prefix))
 }

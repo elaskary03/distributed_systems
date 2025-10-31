@@ -7,13 +7,7 @@ use axum::{
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     fs as tokio_fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -21,12 +15,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tower_http::services::ServeDir;
-
-// ===== crypto + stego =====
-use chacha20poly1305::{aead::Aead, aead::KeyInit, ChaCha20Poly1305, Key, Nonce};
 use rand_core::{OsRng, RngCore};
-use sha2::{Digest, Sha256};
-use image::{DynamicImage, RgbaImage};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Cloud P2P GUI (talks to the existing Proxy)")]
@@ -44,7 +33,6 @@ struct Args {
 struct AppState {
     proxy_addr: Arc<String>,
     uploads_dir: Arc<PathBuf>,
-    stego_dir: Arc<PathBuf>,
 }
 
 /* =========================
@@ -65,9 +53,7 @@ struct UnregisterReq {
 struct UploadResp {
     image_id: String,
     original_path: String,
-    stego_path: String,
-    ciphertext_sha256: String,
-    bytes_embedded: usize,
+    status: String,
 }
 
 /* =========================
@@ -77,42 +63,27 @@ struct UploadResp {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    // Ensure storage dirs exist
     let uploads_dir = PathBuf::from("uploads");
-    let stego_dir = PathBuf::from("stego");
     fs::create_dir_all(&uploads_dir).ok();
-    fs::create_dir_all(&stego_dir).ok();
 
     let state = AppState {
         proxy_addr: Arc::new(args.proxy_addr),
         uploads_dir: Arc::new(uploads_dir),
-        stego_dir: Arc::new(stego_dir),
     };
 
-    // Static file serving for downloads
-    let files_router = Router::new()
-        .nest_service(
-            "/uploads",
-            ServeDir::new("uploads").append_index_html_on_directories(false),
-        )
-        .nest_service(
-            "/stego",
-            ServeDir::new("stego").append_index_html_on_directories(false),
-        );
+    let files_router = Router::new().nest_service(
+        "/uploads",
+        ServeDir::new("uploads").append_index_html_on_directories(false),
+    );
 
     let app = Router::new()
-        // UI
         .route("/", get(ui))
-        // API
         .route("/api/register", post(api_register))
         .route("/api/unregister", post(api_unregister))
         .route("/api/leader", get(api_leader))
         .route("/api/users", get(api_users))
         .route("/api/list", get(api_list))
-        .route("/api/send", post(api_send))
-        // NEW: upload
         .route("/api/upload", post(api_upload))
-        // files
         .nest("/files", files_router)
         .with_state(state);
 
@@ -124,133 +95,261 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /* =========================
-   UI
+   UI (HTML) – light theme, robust layout
    ========================= */
 async fn ui() -> impl IntoResponse {
     const PAGE: &str = r#"<!doctype html>
-<html lang="en">
+<html>
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Cloud P2P GUI</title>
-<style>
-  :root { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
-  body { margin: 24px; }
-  h1 { margin-bottom: 8px; }
-  .card { padding: 16px; border: 1px solid #ddd; border-radius: 12px; margin-bottom: 16px; }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  input, button, select { padding: 8px 10px; border-radius: 8px; border: 1px solid #ccc; }
-  button { cursor: pointer; }
-  pre { background: #f7f7f7; padding: 12px; border-radius: 10px; overflow:auto; max-height: 300px;}
-  .muted { color:#666; font-size: 12px; }
-  label { display:block; margin: 4px 0; }
-</style>
+  <meta charset="utf-8">
+  <title>Cloud P2P GUI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root{
+      --bg: #f7f9fc;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --card: #ffffff;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --accent-700: #1d4ed8;
+      --ok: #16a34a;
+      --warn: #b45309;
+    }
+    *{ box-sizing: border-box; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+    }
+    .container{
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 24px 16px 56px;
+    }
+    h1{ margin:0 0 6px; font-size: 28px; line-height: 1.2; }
+    .sub{ color: var(--muted); margin-bottom: 18px; }
+
+    /* grid that never overlaps */
+    .grid{
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      align-items: start;
+    }
+    .grid-2-1{
+      display: grid;
+      gap: 16px;
+      grid-template-columns: 2fr 1fr;
+    }
+    @media (max-width: 960px){
+      .grid-2-1{ grid-template-columns: 1fr; }
+    }
+
+    section{
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+    }
+    section h2{
+      margin: 0 0 10px;
+      font-size: 18px;
+      display:flex; align-items:center; gap:8px;
+    }
+    .badge{
+      font-size: 12px; color: #1e40af; background: #e0e7ff;
+      border: 1px solid #c7d2fe; padding: 2px 8px; border-radius: 999px;
+    }
+
+    label{ display:block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+    input[type="text"], input[type="password"], input[type="file"]{
+      width: 100%; padding: 10px 12px; border-radius: 10px;
+      border: 1px solid var(--border); background: #fff; color: var(--text);
+    }
+    input:focus{
+      outline: none; border-color: #c4d0ff; box-shadow: 0 0 0 3px rgba(37,99,235,.18);
+    }
+    .row{ display:grid; grid-template-columns: 1fr; gap:12px; }
+    @media (min-width: 720px){ .row{ grid-template-columns: 1fr 1fr; } }
+
+    .btns{ display:flex; gap:8px; flex-wrap: wrap; }
+    button{
+      cursor: pointer; border: 1px solid #d1d5db; background: #f9fafb; color: #111827;
+      padding: 8px 12px; border-radius: 10px; font-weight: 600;
+    }
+    button:hover{ background:#f3f4f6; }
+    .btn-accent{ background: var(--accent); border-color: var(--accent); color:#fff; }
+    .btn-accent:hover{ background: var(--accent-700); }
+    .btn-ok{ color:#fff; background: var(--ok); border-color: var(--ok); }
+    .btn-warn{ color:#fff; background: var(--warn); border-color: var(--warn); }
+
+    .out{
+      margin-top:10px; background:#f8fafc; border:1px solid var(--border);
+      border-radius:10px; padding:10px 12px; min-height: 44px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 13px; white-space: pre-wrap; overflow:auto; max-height: 220px;
+    }
+
+    .hint{ color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .pill{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border); background:#fff; }
+  </style>
 </head>
 <body>
-  <h1>Cloud P2P – Client GUI</h1>
+  <div class="container">
+    <h1>Cloud P2P GUI</h1>
+    <div class="sub">Proxy-backed UI for your Raft cluster. Upload an image to encrypt & embed via the cluster. Manage users and inspect state.</div>
 
-  <div class="card">
-    <h3>Leader</h3>
-    <div class="row">
-      <button onclick="fetchText('/api/leader','#leader')">Get Leader</button>
-      <button onclick="fetchText('/api/list','#log')">Show Log</button>
-      <button onclick="fetchText('/api/users','#users')">Show Users</button>
+    <!-- Top row: Upload (spans wider) + Leader -->
+    <div class="grid-2-1">
+      <section>
+        <h2>🖼️ Upload & Encrypt <span class="badge">ENCRYPT_ON_CLOUD</span></h2>
+        <form id="uploadForm">
+          <div class="row">
+            <div>
+              <label>Image file</label>
+              <input type="file" name="file" required>
+            </div>
+            <div>
+              <label>Passphrase</label>
+              <input type="password" name="passphrase" placeholder="required by proxy">
+            </div>
+          </div>
+          <div style="margin-top:12px" class="btns">
+            <button type="submit" class="btn-accent">Upload & Encrypt</button>
+          </div>
+        </form>
+        <div id="uploadOut" class="out"></div>
+        <div class="hint">Encrypted image will be saved as <span class="pill">stego/&lt;image_id&gt;.png</span> (per your proxy/node paths).</div>
+      </section>
+
+      <section>
+        <h2>👑 Leader</h2>
+        <div class="btns">
+          <button id="leaderBtn">LEADER</button>
+        </div>
+        <div id="leaderOut" class="out"></div>
+      </section>
     </div>
-    <h4>Leader:</h4>
-    <pre id="leader">(click "Get Leader")</pre>
-  </div>
 
-  <div class="card">
-    <h3>Register User</h3>
-    <div class="row">
-      <input id="reg-user" placeholder="user (e.g., alice)" />
-      <input id="reg-ip" placeholder="ip (e.g., 192.168.1.100)" />
-      <button onclick="registerUser()">Register</button>
+    <!-- Second row: Users & Inspect side-by-side (auto-fit, no overlap) -->
+    <div class="grid">
+      <section>
+        <h2>👤 Users — Register / Unregister</h2>
+        <form id="regForm" style="margin-bottom:8px">
+          <div class="row">
+            <div>
+              <label>User</label>
+              <input name="user" type="text" placeholder="alice" required>
+            </div>
+            <div>
+              <label>IP</label>
+              <input name="ip" type="text" placeholder="10.0.0.1" required>
+            </div>
+          </div>
+          <div style="margin-top:8px" class="btns">
+            <button type="submit" class="btn-ok">REGISTER</button>
+            <button type="button" id="unregBtn" class="btn-warn">UNREGISTER</button>
+          </div>
+        </form>
+        <div id="regOut" class="out"></div>
+      </section>
+
+      <section>
+        <h2>📜 Inspect</h2>
+        <div class="btns" style="margin-bottom:8px">
+          <button id="usersBtn">SHOW_USERS</button>
+          <button id="listBtn">LIST</button>
+        </div>
+        <div>
+          <label>SHOW_USERS Output</label>
+          <div id="usersOut" class="out"></div>
+        </div>
+        <div style="margin-top:10px">
+          <label>LIST Output</label>
+          <div id="listOut" class="out"></div>
+        </div>
+      </section>
     </div>
-    <pre id="reg-resp"></pre>
   </div>
 
-  <div class="card">
-    <h3>Unregister User</h3>
-    <div class="row">
-      <input id="unreg-user" placeholder="user (e.g., alice)" />
-      <button onclick="unregisterUser()">Unregister</button>
-    </div>
-    <pre id="unreg-resp"></pre>
-  </div>
+  <script>
+    const $ = sel => document.querySelector(sel);
+    const text = (id, s) => ($(id).textContent = s);
 
-  <div class="card">
-    <h3>Users</h3>
-    <pre id="users">(click "Show Users")</pre>
-  </div>
+    /* Upload & ENCRYPT_ON_CLOUD */
+    $('#uploadForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      try {
+        const res = await fetch('/api/upload', { method: 'POST', body: fd });
+        if (!res.ok) { text('#uploadOut', await res.text()); return; }
+        const json = await res.json();
+        text('#uploadOut', JSON.stringify(json, null, 2));
+      } catch (err) { text('#uploadOut', String(err)); }
+    });
 
-  <div class="card">
-    <h3>Log</h3>
-    <pre id="log">(click "Show Log")</pre>
-  </div>
+    /* Register */
+    $('#regForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const body = { user: f.get('user'), ip: f.get('ip') };
+      try {
+        const res = await fetch('/api/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        text('#regOut', await res.text());
+      } catch (err) { text('#regOut', String(err)); }
+    });
 
-  <div class="card">
-    <h3>Upload & Stego-Encrypt Image</h3>
-    <form id="uploadForm">
-      <label>Image file: <input type="file" id="file" name="file" accept="image/*" required /></label>
-      <label>Passphrase (optional – default random): <input id="pass" name="passphrase" type="password" /></label>
-      <button type="submit">Upload & Encrypt</button>
-    </form>
-    <div class="muted">We encrypt the image with ChaCha20-Poly1305 and hide the ciphertext in the image's least significant bits. The stego PNG is downloadable below.</div>
-    <pre id="upload-resp"></pre>
-  </div>
+    /* Unregister */
+    $('#unregBtn').addEventListener('click', async () => {
+      const f = new FormData($('#regForm'));
+      const user = f.get('user');
+      try {
+        const res = await fetch('/api/unregister', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user })
+        });
+        text('#regOut', await res.text());
+      } catch (err) { text('#regOut', String(err)); }
+    });
 
-<script>
-async function fetchText(url, sel) {
-  const r = await fetch(url);
-  const t = await r.text();
-  document.querySelector(sel).textContent = t;
-}
-async function registerUser() {
-  const user = document.querySelector('#reg-user').value.trim();
-  const ip = document.querySelector('#reg-ip').value.trim();
-  const r = await fetch('/api/register', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user, ip})});
-  const t = await r.text();
-  document.querySelector('#reg-resp').textContent = t;
-}
-async function unregisterUser() {
-  const user = document.querySelector('#unreg-user').value.trim();
-  const r = await fetch('/api/unregister', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user})});
-  const t = await r.text();
-  document.querySelector('#unreg-resp').textContent = t;
-}
-document.querySelector('#uploadForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const fd = new FormData();
-  const f = document.querySelector('#file').files[0];
-  const pass = document.querySelector('#pass').value;
-  fd.append('file', f);
-  fd.append('passphrase', pass);
-  const r = await fetch('/api/upload', { method:'POST', body: fd });
-  const txt = await r.text();
-  try {
-    const j = JSON.parse(txt);
-    document.querySelector('#upload-resp').textContent =
-      JSON.stringify(j, null, 2) +
-      "\nDownload stego: " + (j.stego_path || "");
-  } catch {
-    document.querySelector('#upload-resp').textContent = txt;
-  }
-});
-</script>
+    /* SHOW_USERS */
+    $('#usersBtn').addEventListener('click', async () => {
+      try { text('#usersOut', await (await fetch('/api/users')).text()); }
+      catch (err) { text('#usersOut', String(err)); }
+    });
+
+    /* LIST */
+    $('#listBtn').addEventListener('click', async () => {
+      try { text('#listOut', await (await fetch('/api/list')).text()); }
+      catch (err) { text('#listOut', String(err)); }
+    });
+
+    /* LEADER */
+    $('#leaderBtn').addEventListener('click', async () => {
+      try { text('#leaderOut', await (await fetch('/api/leader')).text()); }
+      catch (err) { text('#leaderOut', String(err)); }
+    });
+  </script>
 </body>
 </html>
 "#;
+
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
     (StatusCode::OK, headers, Html(PAGE))
 }
 
 /* =========================
-   API handlers (existing)
+   API handlers
    ========================= */
-#[derive(Deserialize)]
-struct SendBody(String);
 
 async fn api_register(
     State(st): State<AppState>,
@@ -283,26 +382,14 @@ async fn api_users(State(st): State<AppState>) -> impl IntoResponse {
 async fn api_list(State(st): State<AppState>) -> impl IntoResponse {
     proxy_send_multiline(&st.proxy_addr, "LIST").await.into_response()
 }
-async fn api_send(State(st): State<AppState>, body: String) -> impl IntoResponse {
-    let line = body.trim();
-    if line.is_empty() {
-        return (StatusCode::BAD_REQUEST, "empty command").into_response();
-    }
-    if line == "LEADER" || line == "LIST" || line == "SHOW_USERS" {
-        proxy_send_multiline(&st.proxy_addr, line).await.into_response()
-    } else {
-        proxy_send_oneline(&st.proxy_addr, line).await.into_response()
-    }
-}
 
 /* =========================
-   NEW: Upload handler
+   Upload handler
    ========================= */
 async fn api_upload(
     State(st): State<AppState>,
     mut mp: Multipart,
 ) -> impl IntoResponse {
-    // Read fields
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut filename: String = "upload".to_string();
     let mut passphrase: Option<String> = None;
@@ -327,84 +414,30 @@ async fn api_upload(
         None => return (StatusCode::BAD_REQUEST, "missing file").into_response(),
     };
 
-    // Persist original
     let image_id = format!("img-{}", now_nanos());
-    let original_path = st.uploads_dir.join(format!("{}-{}", image_id, sanitize(&filename)));
+    let original_path = st
+        .uploads_dir
+        .join(format!("{}-{}", image_id, sanitize(&filename)));
+
     if let Err(e) = tokio_fs::write(&original_path, &bytes).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("write original: {e}")).into_response();
     }
 
-    // Load image
-    let rgba = match image::load_from_memory(&bytes) {
-        Ok(i) => i.to_rgba8(),
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("invalid image: {e}")).into_response(),
-    };
-
-    // Encrypt raw bytes with ChaCha20-Poly1305
+    // Ask the proxy to coordinate the cluster-side encryption/stego
     let pass = passphrase.unwrap_or_default();
-    let key = derive_key(pass.as_bytes());
-    let nonce = rand_nonce();
-    let cipher = ChaCha20Poly1305::new(&key);
-    let ciphertext = match cipher.encrypt(&nonce, bytes.as_ref()) {
-        Ok(ct) => ct,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("encrypt: {e}")).into_response(),
-    };
+    let cmd = format!("ENCRYPT_ON_CLOUD {} {}", image_id, pass);
+    let (status, resp) = proxy_send_oneline(&st.proxy_addr, &cmd).await;
 
-    // Prepare data to embed: [nonce(12) | len_u32 | ciphertext]
-    let mut embed_data = Vec::with_capacity(12 + 4 + ciphertext.len());
-    embed_data.extend_from_slice(nonce.as_ref()); // non-deprecated
-    embed_data.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-    embed_data.extend_from_slice(&ciphertext);
-
-    // Capacity check: 1 LSB per RGBA channel (4 bits/pixel) → capacity_bytes = (w*h*4)/8
-    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-    let capacity_bits = w * h * 4;
-    let needed_bits = embed_data.len() * 8;
-    if needed_bits > capacity_bits {
-        let msg = format!(
-            "image too small for payload: need {} bits ({} bytes), capacity {} bits (~{} bytes). Use a larger image.",
-            needed_bits, embed_data.len(), capacity_bits, capacity_bits/8
-        );
-        return (StatusCode::BAD_REQUEST, msg).into_response();
-    }
-
-    // Embed into LSBs
-    let stego = match embed_lsb_rgba(&rgba, &embed_data) {
-        Ok(img) => img,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("embed: {e}")).into_response(),
-    };
-
-    // Save stego as PNG
-    let stego_name = format!("{}-stego.png", image_id);
-    let stego_path = st.stego_dir.join(&stego_name);
-    if let Err(e) = stego.save(&stego_path) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("save stego: {e}")).into_response();
-    }
-
-    // Compute SHA256 of ciphertext for metadata/logging
-    let ct_sha = {
-        let mut hasher = Sha256::new();
-        hasher.update(&ciphertext);
-        hex::encode(hasher.finalize())
-    };
-
-    // Log metadata via proxy using SUBMIT (non-breaking)
-    let _ = proxy_send_oneline(
-        &st.proxy_addr,
-        &format!("SUBMIT {} ENCRYPT_IMAGE {} {}", next_op_id(), image_id, ct_sha),
-    )
-    .await;
-
-    // Build response (paths are under /files/...)
     let resp = UploadResp {
         image_id,
-        original_path: format!("/files/uploads/{}", original_path.file_name().unwrap().to_string_lossy()),
-        stego_path: format!("/files/stego/{}", stego_name),
-        ciphertext_sha256: ct_sha,
-        bytes_embedded: embed_data.len(),
+        original_path: format!(
+            "/files/uploads/{}",
+            original_path.file_name().unwrap().to_string_lossy()
+        ),
+        status: resp,
     };
 
-    (StatusCode::OK, Json(resp)).into_response()
+    (status, Json(resp)).into_response()
 }
 
 /* =========================
@@ -429,23 +462,20 @@ async fn talk_once(proxy_addr: &str, cmd_line: &str) -> anyhow::Result<String> {
     let (r, mut w) = s.split();
     let mut reader = BufReader::new(r);
 
-    // proxy banner
+    // read banner from proxy
     let mut tmp = String::new();
     reader.read_line(&mut tmp).await?;
     tmp.clear();
     reader.read_line(&mut tmp).await?;
 
-    // command
     w.write_all(cmd_line.as_bytes()).await?;
     w.write_all(b"\n").await?;
 
-    // one line
     let mut resp = String::new();
     reader.read_line(&mut resp).await?;
     Ok(resp)
 }
 
-/// Wait for first line (≤1s), then read until 150ms idle.
 async fn read_multiline(proxy_addr: &str, cmd_line: &str) -> anyhow::Result<String> {
     let mut s = TcpStream::connect(proxy_addr).await?;
     let (r, mut w) = s.split();
@@ -457,25 +487,15 @@ async fn read_multiline(proxy_addr: &str, cmd_line: &str) -> anyhow::Result<Stri
     tmp.clear();
     reader.read_line(&mut tmp).await?;
 
-    // send
     w.write_all(cmd_line.as_bytes()).await?;
     w.write_all(b"\n").await?;
 
     let mut out = String::new();
-
-    // ensure first line
     let mut first = String::new();
     match timeout(Duration::from_secs(1), reader.read_line(&mut first)).await {
-        Ok(Ok(n)) if n > 0 => {
-            out.push_str(&first);
-            if cmd_line == "LEADER" {
-                return Ok(out);
-            }
-        }
+        Ok(Ok(n)) if n > 0 => out.push_str(&first),
         _ => anyhow::bail!("empty reply"),
     }
-
-    // gather the rest until idle
     loop {
         let mut buf = String::new();
         tokio::select! {
@@ -487,56 +507,7 @@ async fn read_multiline(proxy_addr: &str, cmd_line: &str) -> anyhow::Result<Stri
             _ = sleep(Duration::from_millis(150)) => { break; }
         }
     }
-
     Ok(out)
-}
-
-/* =========================
-   Stego helpers
-   ========================= */
-
-fn derive_key(pass: &[u8]) -> Key {
-    // SHA-256(passphrase) → 32 bytes
-    let mut h = Sha256::new();
-    h.update(pass);
-    let out = h.finalize();
-    // Key is a type alias (no generic param)
-    *Key::from_slice(&out)
-}
-
-fn rand_nonce() -> Nonce {
-    // 12-byte nonce
-    let mut n = [0u8; 12];
-    OsRng.fill_bytes(&mut n);
-    *Nonce::from_slice(&n)
-}
-
-fn embed_lsb_rgba(img: &RgbaImage, data: &[u8]) -> anyhow::Result<DynamicImage> {
-    // Embed 1 bit per channel (RGBA) in raster order.
-    let mut out = img.clone();
-    let mut bit_idx = 0usize;
-
-    for y in 0..out.height() {
-        for x in 0..out.width() {
-            let mut px = *out.get_pixel(x, y); // copy value, not a ref
-            for ch in 0..4 {
-                if bit_idx >= data.len() * 8 {
-                    out.put_pixel(x, y, px);
-                    return Ok(DynamicImage::ImageRgba8(out));
-                }
-                let byte = data[bit_idx / 8];
-                let bit = (byte >> (7 - (bit_idx % 8))) & 1;
-                px[ch] = (px[ch] & 0xFE) | bit; // set LSB
-                bit_idx += 1;
-            }
-            out.put_pixel(x, y, px);
-        }
-    }
-
-    if bit_idx < data.len() * 8 {
-        anyhow::bail!("not enough capacity (unexpected; capacity was checked)");
-    }
-    Ok(DynamicImage::ImageRgba8(out))
 }
 
 /* =========================
@@ -556,6 +527,7 @@ fn now_nanos() -> u128 {
         .as_nanos()
 }
 
+#[allow(dead_code)]
 fn next_op_id() -> String {
     let mut r = [0u8; 4];
     OsRng.fill_bytes(&mut r);
