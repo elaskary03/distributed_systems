@@ -25,6 +25,8 @@ pub enum Command {
     UpdateLoadBalancing { server_id: u32, load: f64 },
     EncryptImage { image_id: String, metadata: String },
     SendPhoto { photo_id: String, photo_data: Vec<u8> },
+
+    
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

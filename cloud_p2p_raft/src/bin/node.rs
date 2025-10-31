@@ -12,6 +12,11 @@ use bytes::Bytes;
 use futures::{StreamExt, SinkExt};
 use tracing::{debug, info, error};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use sha2::{Sha256, Digest};
+use hex;
+use tokio::io::AsyncReadExt; // for reader.read(...)
+use tokio::fs;
+
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -770,6 +775,57 @@ impl NetNode {
         }
     }
 
+    async fn receive_photo_stream(
+        &self,
+        reader: &mut BufReader<tokio::net::tcp::ReadHalf<'_>>,
+        photo_id: &str,
+        mut remaining: usize,
+    ) -> anyhow::Result<String> {
+        // Ensure photos dir exists
+        fs::create_dir_all("photos").await?;
+
+        let tmp_path = format!("photos/{}.part", photo_id);
+        let final_path = format!("photos/{}.bin", photo_id);
+
+        // Open file for writing
+        let mut file = tokio::fs::File::create(&tmp_path).await?;
+
+        // SHA256 hasher
+        let mut hasher = Sha256::new();
+
+        // Buffer for streaming
+        let mut buf = vec![0u8; 64 * 1024]; // 64KB buffer
+
+        while remaining > 0 {
+            let to_read = std::cmp::min(buf.len(), remaining);
+            // read up to to_read bytes into buf[0..to_read]
+            let n = reader.read(&mut buf[..to_read]).await?;
+            if n == 0 {
+                anyhow::bail!("unexpected EOF while reading photo (remaining {} bytes)", remaining);
+            }
+            // write to file
+            file.write_all(&buf[..n]).await?;
+            // update hash
+            hasher.update(&buf[..n]);
+            remaining -= n;
+        }
+
+        // flush & sync (optional)
+        file.flush().await?;
+        // Optionally sync data to disk:
+        // use tokio::fs::File::sync_all - note std::fs::File has sync_all, tokio provides it via File::sync_all
+        file.sync_all().await.ok();
+
+        // compute hex checksum
+        let digest = hasher.finalize();
+        let checksum_hex = hex::encode(digest);
+
+        // atomically rename part -> final
+        tokio::fs::rename(&tmp_path, &final_path).await?;
+
+        Ok(checksum_hex)
+    }
+
     async fn heartbeat_loop(&self) {
         loop {
             // Heartbeat interval should be significantly less than election timeout but not too aggressive
@@ -1045,21 +1101,55 @@ impl NetNode {
 
 
                 Some("SEND_PHOTO") => {
-                    if let (Some(photo_id), Some(file_path)) = (parts.next(), parts.next()) {
-                        let photo_path = format!("photos/{}.jpg", photo_id);
-                        match tokio::fs::read(file_path).await {
-                            Ok(image_data) => {
-                                tokio::fs::write(&photo_path, image_data).await?;
-                                info!("Node {}: Saved photo {} from {} to {}", self.id, photo_id, file_path, photo_path);
+                    // Two supported variants:
+                    // 1) SEND_PHOTO <photo_id> <file_path>   (existing behavior: server reads local file_path)
+                    // 2) SEND_PHOTO <photo_id> <size> <carrier>  (new): client streams <size> bytes after the header
+                    if let Some(photo_id) = parts.next() {
+                        if let Some(second) = parts.next() {
+                            // If second token parses as an integer -> treat as streamed upload size
+                            if let Ok(size) = second.parse::<usize>() {
+                                // optional carrier token (we ignore for now)
+                                let _carrier = parts.next(); // may be Some("png") etc.
+                                // Call helper to receive exactly `size` bytes from the TCP stream (reader)
+                                match self.receive_photo_stream(&mut reader, photo_id, size).await {
+                                    Ok(checksum) => {
+                                        let resp = format!("OK {}\n", checksum);
+                                        w.write_all(resp.as_bytes()).await?;
+                                        info!("Node {}: received photo {} ({} bytes), checksum {}", self.id, photo_id, size, checksum);
+                                    }
+                                    Err(e) => {
+                                        let err = format!("ERR upload failed: {}\n", e);
+                                        w.write_all(err.as_bytes()).await?;
+                                        error!("Node {}: receive_photo_stream failed: {}", self.id, e);
+                                    }
+                                }
+                            } else {
+                                // Not numeric → treat as file_path on server
+                                let file_path = second;
+                                let photo_path = format!("photos/{}.jpg", photo_id);
+                                match tokio::fs::read(file_path).await {
+                                    Ok(image_data) => {
+                                        tokio::fs::write(&photo_path, image_data).await?;
+                                        info!("Node {}: Saved photo {} from {} to {}", self.id, photo_id, file_path, photo_path);
+                                        w.write_all(b"OK\n").await?;
+                                    }
+                                    Err(e) => {
+                                        info!("Node {}: Failed to read photo file {}: {}", self.id, file_path, e);
+                                        let err = format!("ERR could not read file: {}\n", e);
+                                        w.write_all(err.as_bytes()).await?;
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                info!("Node {}: Failed to read photo file {}: {}", self.id, file_path, e);
-                            }
+                        } else {
+                            info!("Node {}: Malformed SEND_PHOTO command (missing args)", self.id);
+                            w.write_all(b"ERR malformed SEND_PHOTO\n").await?;
                         }
                     } else {
-                        info!("Node {}: Malformed SEND_PHOTO command", self.id);
+                        info!("Node {}: Malformed SEND_PHOTO command (missing photo_id)", self.id);
+                        w.write_all(b"ERR malformed SEND_PHOTO\n").await?;
                     }
                 }
+
 
                 Some(unknown) => {
                     let s = format!("ERR unknown command: {}\n", unknown);

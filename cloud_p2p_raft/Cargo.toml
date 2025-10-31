@@ -21,6 +21,8 @@ hyper = "1"
 tower = "0.5"
 thiserror = "1"
 base64 = "0.21"
+sha2 = "0.10"
+hex = "0.4"
 
 
 [[bin]]
