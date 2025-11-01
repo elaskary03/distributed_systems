@@ -172,33 +172,47 @@ impl NetNode {
     }
 
     async fn forward_to_leader(&self, cmd_line: &str) -> anyhow::Result<String> {
-        let lid = (*self.leader_hint.read().await)
-            .ok_or_else(|| anyhow::anyhow!("no leader hint"))?;
-        let addr = NetNode::client_addr_for(lid);
+    let lid = (*self.leader_hint.read().await)
+        .ok_or_else(|| anyhow::anyhow!("no leader hint"))?;
+    let addr = NetNode::client_addr_for(lid);
 
-        let stream = TcpStream::connect(addr).await?;
-        let (r, mut w) = stream.into_split();
-        let mut reader = BufReader::new(r);
+    let stream = TcpStream::connect(addr).await?;
+    let (r, mut w) = stream.into_split();
+    let mut reader = BufReader::new(r);
 
-        // Read the 2-line banner
-        let mut tmp = String::new();
-        reader.read_line(&mut tmp).await?; // "Welcome..."
-        tmp.clear();
-        reader.read_line(&mut tmp).await?; // "Commands: ..."
+    // read banner (2 lines)
+    let mut tmp = String::new();
+    reader.read_line(&mut tmp).await?;
+    tmp.clear();
+    reader.read_line(&mut tmp).await?;
 
-        // Send the same command to the leader
-        w.write_all(cmd_line.as_bytes()).await?;
-        w.write_all(b"\n").await?;
+    // send the forwarded command
+    w.write_all(cmd_line.as_bytes()).await?;
+    w.write_all(b"\n").await?;
 
-        // Read one response burst (OK / NOT_LEADER / REDIRECT / multi-line list)
-        // For our writes we only need 'OK' or a line.
-        let mut buf = String::new();
-        // Try to read a few lines quickly; stop if no data comes for a moment
-        // (simple approach: read up to 8KB or until reader would block)
-        // Here: read until first newline
-        reader.read_line(&mut buf).await?;
-        Ok(buf)
+    // read a short burst of response lines (handles multi-line commands)
+    use tokio::time::{timeout, Duration};
+    let mut out = String::new();
+
+    // read first line (block up to 500ms)
+    let mut buf = String::new();
+    match timeout(Duration::from_millis(500), reader.read_line(&mut buf)).await {
+        Ok(Ok(n)) if n > 0 => out.push_str(&buf),
+        _ => return Ok(out), // nothing
     }
+
+    // then keep grabbing lines while they arrive quickly
+    loop {
+        buf.clear();
+        match timeout(Duration::from_millis(120), reader.read_line(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => out.push_str(&buf),
+            _ => break,
+        }
+    }
+
+    Ok(out)
+}
+
 
     async fn start(self: Arc<Self>, listen_addr: SocketAddr) -> anyhow::Result<()> {
         // Start listener with retry
@@ -618,6 +632,8 @@ impl NetNode {
             *self.state.write().await = RaftState::Leader;
             info!("Node {} became leader for term {}", self.id, current_term);
 
+            self.rebuild_state_from_log().await;
+
             // Properly initialize replication state (Raft §5.2)
             let last_index = self.log.read().await.len() as u64;
             {
@@ -710,6 +726,40 @@ impl NetNode {
         false
     }
 
+    // 🔁 Rebuilds the in-memory state machine (e.g., registered_users) from the committed log
+    async fn rebuild_state_from_log(&self) {
+        let log = self.log.read().await;
+        let commit_index = *self.commit_index.read().await;
+
+        info!("Node {} rebuilding state from {} committed entries", self.id, commit_index);
+
+        self.registered_users.write().await.clear();
+
+        for i in 0..commit_index {
+            if let Some(entry) = log.get(i as usize) {
+                let mut parts = entry.command.split_whitespace();
+                match parts.next() {
+                    Some("REGISTER") => {
+                        if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
+                            self.registered_users
+                                .write().await
+                                .insert(user.to_string(), ip.to_string());
+                        }
+                    }
+                    Some("UNREGISTER") => {
+                        if let Some(user) = parts.next() {
+                            self.registered_users.write().await.remove(user);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        info!("Node {} rebuild complete: {} users restored",
+            self.id, self.registered_users.read().await.len());
+    }
+
     // Apply committed log entries to state machine
         // Apply committed log entries to state machine
     async fn apply_committed_entries(&self) {
@@ -717,16 +767,13 @@ impl NetNode {
         let mut last_applied = self.last_applied.write().await;
 
         if commit_index > *last_applied {
-            // Only the leader executes commands
-            if !matches!(*self.state.read().await, RaftState::Leader) {
-                *last_applied = commit_index;
-                return;
-            }
             let log = self.log.read().await;
             for i in (*last_applied + 1)..=commit_index {
                 if let Some(entry) = log.get(i as usize - 1) {
-                    // Parse and apply: commands are simple strings like:
-                    // "REGISTER <user> <ip>" or "UNREGISTER <user>"
+                    if !matches!(*self.state.read().await, RaftState::Leader) {
+                        info!("Node {} (follower) skipping execution of {}", self.id, entry.command);
+                        continue;
+                    }
                     let mut parts = entry.command.split_whitespace();
                     match parts.next() {
                         Some("REGISTER") => {
@@ -1023,6 +1070,25 @@ impl NetNode {
                 }
                 
                 Some("SHOW_USERS") => {
+                    if !is_leader {
+                        // forward to the leader so you always see the leader’s authoritative state
+                        match self.forward_to_leader("SHOW_USERS").await {
+                            Ok(reply) => {
+                                w.write_all(reply.as_bytes()).await?;
+                            }
+                            Err(_) => {
+                                if let Some(lid) = *self.leader_hint.read().await {
+                                    let addr = NetNode::client_addr_for(lid);
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                } else {
+                                    w.write_all(b"NOT_LEADER\n").await?;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // leader path (unchanged)
                     let users = self.registered_users.read().await;
                     if users.is_empty() {
                         w.write_all(b"(empty)\n").await?;
