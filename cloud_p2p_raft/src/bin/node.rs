@@ -125,6 +125,7 @@ struct NetNode {
     processed_ops: Arc<RwLock<std::collections::HashSet<String>>>,
     local_pending: Arc<RwLock<u32>>,                         // how many delegated tasks this node is executing now
     load_table: Arc<RwLock<HashMap<u32, (u32, u128)>>>,
+    client_addr: String,
 }
 
 impl NetNode {
@@ -142,6 +143,7 @@ impl NetNode {
 
         Self {
             id,
+            client_addr,
             state: Arc::new(RwLock::new(RaftState::Follower)),
             current_term: Arc::new(RwLock::new(0)),
             voted_for: Arc::new(RwLock::new(None)),
@@ -179,8 +181,11 @@ impl NetNode {
         (prev_log_index, prev_log_term)
     }
 
-    fn client_addr_for(id: u32) -> String {
-        format!("127.0.0.1:{}", 9000 + id)
+    fn client_addr_for(&self, id: u32) -> String {
+        if id == self.id {
+            return self.client_addr.clone();
+        }
+        format!("{}:{}", self.client_addr.split(':').next().unwrap_or("127.0.0.1"), 9000 + id)
     }
 
     async fn execute_delegated(&self, cmd: &str) -> anyhow::Result<()> {
@@ -191,7 +196,7 @@ impl NetNode {
     async fn forward_to_leader(&self, cmd_line: &str) -> anyhow::Result<String> {
     let lid = (*self.leader_hint.read().await)
         .ok_or_else(|| anyhow::anyhow!("no leader hint"))?;
-    let addr = NetNode::client_addr_for(lid);
+    let addr = self.client_addr_for(lid);
 
     let stream = TcpStream::connect(addr).await?;
     let (r, mut w) = stream.into_split();
@@ -412,7 +417,7 @@ impl NetNode {
         // Start client API listener on a port (9000 + node id)
         let client_node = self.clone();
         tokio::spawn(async move {
-            let client_addr: std::net::SocketAddr = format!("127.0.0.1:{}", 9000 + client_node.id)
+            let client_addr: std::net::SocketAddr = client_node.client_addr.parse().expect("parse client addr");
                 .parse()
                 .expect("parse client addr");
             if let Err(e) = client_node.run_client_api(client_addr).await {
@@ -424,7 +429,7 @@ impl NetNode {
         let delegate_node = self.clone();
         tokio::spawn(async move {
             let port = 9100 + delegate_node.id;
-            let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
+            let addr: std::net::SocketAddr = format!("{}:{}", self.client_addr.split(':').next().unwrap(), port)
                 .parse()
                 .expect("parse delegate addr");
             let listener = TcpListener::bind(addr)
@@ -879,7 +884,7 @@ impl NetNode {
     async fn delegate_execute(&self, delegate_id: u32, command: &str) {
         if let Some(addr) = self.peers.get(&delegate_id) {
             let port = 9100 + delegate_id; // delegate TCP port (choose any free range)
-            let target_addr = format!("127.0.0.1:{}", port);
+            let target_addr = format!("{}:{}", self.client_addr.split(':').next().unwrap(), port);
             if let Ok(mut stream) = TcpStream::connect(&target_addr).await {
                 let _ = stream
                     .write_all(format!("{}\n", command).as_bytes())
@@ -905,7 +910,7 @@ impl NetNode {
 
         info!("Node {} rebuilding state from {} committed entries", self.id, commit_index);
 
-       //self.registered_users.write().await.clear();
+       self.registered_users.write().await.clear();
 
         for i in 0..commit_index {
             if let Some(entry) = log.get(i as usize) {
@@ -1207,7 +1212,7 @@ impl NetNode {
                     if is_leader {
                         w.write_all(format!("LEADER {}\n", self.id).as_bytes()).await?;
                     } else if let Some(lid) = *self.leader_hint.read().await {
-                        let addr = NetNode::client_addr_for(lid);
+                        let addr = self.client_addr_for(lid);
                         w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
                     } else {
                         w.write_all(b"NOT_LEADER\n").await?;
@@ -1223,7 +1228,7 @@ impl NetNode {
                             Err(_) => {
                                 // fallback to hint if we can
                                 if let Some(lid) = *self.leader_hint.read().await {
-                                    let addr = NetNode::client_addr_for(lid);
+                                    let addr = self.client_addr_for(lid);
                                     w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
                                 } else {
                                     w.write_all(b"NOT_LEADER\n").await?;
@@ -1261,7 +1266,7 @@ impl NetNode {
                             Err(_) => {
                                 // fallback to hint if we can
                                 if let Some(lid) = *self.leader_hint.read().await {
-                                    let addr = NetNode::client_addr_for(lid);
+                                    let addr = self.client_addr_for(lid);
                                     w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
                                 } else {
                                     w.write_all(b"NOT_LEADER\n").await?;
@@ -1303,7 +1308,7 @@ impl NetNode {
                             }
                             Err(_) => {
                                 if let Some(lid) = *self.leader_hint.read().await {
-                                    let addr = NetNode::client_addr_for(lid);
+                                    let addr = self.client_addr_for(lid);
                                     w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
                                 } else {
                                     w.write_all(b"NOT_LEADER\n").await?;
@@ -1350,7 +1355,7 @@ impl NetNode {
                 let is_leader = matches!(*self.state.read().await, RaftState::Leader);
                 if !is_leader {
                     if let Some(lid) = *self.leader_hint.read().await {
-                        let addr = NetNode::client_addr_for(lid);
+                        let addr = self.client_addr_for(lid);
                         w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
                     } else {
                         w.write_all(b"NOT_LEADER\n").await?;
@@ -1370,7 +1375,7 @@ impl NetNode {
             Some("ENCRYPT_IMAGE") => {
                 if !is_leader {
                     if let Some(lid) = *self.leader_hint.read().await {
-                        let addr = NetNode::client_addr_for(lid);
+                        let addr = self.client_addr_for(lid);
                         w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
                     } else {
                         w.write_all(b"NOT_LEADER\n").await?;
