@@ -986,14 +986,18 @@ impl NetNode {
                                                         continue;
                                                     }
                                                 }
-                                                if let Err(e) = tokio::fs::write(&output_path, &stego_bytes).await {
-                                                    error!("Node {}: failed to save stego image {}: {:?}", self.id, output_path, e);
-                                                } else {
-                                                    info!(
-                                                        "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
-                                                        self.id, input_path, output_path, count, sha
-                                                    );
-                                                }
+                                                // if let Err(e) = tokio::fs::write(&output_path, &stego_bytes).await {
+                                                //     error!("Node {}: failed to save stego image {}: {:?}", self.id, output_path, e);
+                                                // } else {
+                                                //     info!(
+                                                //         "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
+                                                //         self.id, input_path, output_path, count, sha
+                                                //     );
+                                                // }
+                                                info!(
+                                                    "Node {}: ENCRYPT_IMAGE computed successfully ({} bytes embedded, sha256={}), skipping file save",
+                                                    self.id, count, sha
+                                                );
                                             }
                                             Err(e) => error!("Node {}: encryption/embed failed: {:?}", self.id, e),
                                         }
