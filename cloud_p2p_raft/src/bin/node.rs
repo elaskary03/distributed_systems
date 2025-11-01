@@ -428,13 +428,10 @@ impl NetNode {
         let self_clone = self.clone(); // ✅ clone before the spawn
         tokio::spawn(async move {
             let port = 9100 + delegate_node.id;
-            let addr: std::net::SocketAddr = format!(
-                "{}:{}",
-                self_clone.client_addr.split(':').next().unwrap(),
-                port
-            )
-            .parse()
-            .expect("parse delegate addr");
+            let host = self_clone.client_addr.split(':').next().unwrap();
+            let addr: std::net::SocketAddr = format!("{}:{}", host, port)
+                .parse()
+                .expect("parse delegate addr");
             let listener = TcpListener::bind(addr)
                 .await
                 .expect("delegate bind failed");
@@ -884,27 +881,35 @@ impl NetNode {
         self.peers.keys().copied().filter(|i| *i != self.id).choose(&mut rng)
     }
 
-    async fn delegate_execute(&self, delegate_id: u32, command: &str) {
-        if let Some(addr) = self.peers.get(&delegate_id) {
-            let port = 9100 + delegate_id; // delegate TCP port (choose any free range)
-            let target_addr = format!("{}:{}", self.client_addr.split(':').next().unwrap(), port);
-            if let Ok(mut stream) = TcpStream::connect(&target_addr).await {
-                let _ = stream
-                    .write_all(format!("{}\n", command).as_bytes())
-                    .await;
-                info!(
-                    "Leader {} delegated '{}' to follower {} ({})",
-                    self.id, command, delegate_id, target_addr
-                );
+        async fn delegate_execute(&self, delegate_id: u32, command: &str) {
+            if let Some(peer_sock) = self.peers.get(&delegate_id) {
+                // Use the peer’s host from its Raft address
+                let peer_host = peer_sock.ip();
+                let port = 9100 + delegate_id; // delegate listener port
+                let target_addr = format!("{}:{}", peer_host, port);
+
+                match TcpStream::connect(&target_addr).await {
+                    Ok(mut stream) => {
+                        if let Err(e) = stream.write_all(format!("{}\n", command).as_bytes()).await {
+                            error!("Leader {} failed to send command to delegate {}: {:?}", self.id, delegate_id, e);
+                        } else {
+                            info!(
+                                "Leader {} delegated '{}' to follower {} ({})",
+                                self.id, command, delegate_id, target_addr
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "Leader {} failed to connect to delegate {} at {}: {:?}",
+                            self.id, delegate_id, target_addr, e
+                        );
+                    }
+                }
             } else {
-                error!(
-                    "Leader {} failed to connect to delegate {}",
-                    self.id, delegate_id
-                );
+                error!("Leader {}: delegate id {} not found in peers", self.id, delegate_id);
             }
         }
-    }
-
 
     // 🔁 Rebuilds the in-memory state machine (e.g., registered_users) from the committed log
     async fn rebuild_state_from_log(&self) {
