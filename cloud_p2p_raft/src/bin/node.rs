@@ -15,7 +15,10 @@ use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
 use std::path::Path;
 use rand::seq::IteratorRandom;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 use std::sync::atomic::{AtomicU64, Ordering};
+
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -103,28 +106,6 @@ enum ClientResponse {
     Error { message: String },
 }
 
-struct Metrics {
-    // requests & failures
-    requests_total: AtomicU64,
-    failures_total: AtomicU64,
-
-    // latency since leader append -> applied (nanoseconds)
-    latency_sum_ns: AtomicU64,
-    latency_count: AtomicU64,
-    in_flight_start: RwLock<HashMap<u64, Instant>>, // log index -> start time
-
-    // load-balancing (leader's view)
-    delegated_sent_total: AtomicU64,
-    delegated_sent_by_target: RwLock<HashMap<u32, u64>>, // delegate_id -> count
-
-    // execution counters (node's view)
-    tasks_executed_local: AtomicU64,     // executed here by leader fallback/local
-    tasks_executed_delegated: AtomicU64, // executed here because another node delegated
-
-    // leader elections won by THIS server
-    elections_won: AtomicU64,
-}
-
 
 #[derive(Clone)]
 struct NetNode {
@@ -149,8 +130,21 @@ struct NetNode {
     local_pending: Arc<RwLock<u32>>,                         // how many delegated tasks this node is executing now
     load_table: Arc<RwLock<HashMap<u32, (u32, u128)>>>,
     client_addr: String,
-    metrics: Arc<Metrics>,
+        metrics: Arc<Metrics>,
 }
+
+#[derive(Default)]
+struct Metrics {
+    requests_total: AtomicU64,
+    failures_total: AtomicU64,
+    latency_sum_ns: AtomicU64,
+    latency_count: AtomicU64,
+    elections_won: AtomicU64,
+    tasks_executed_local: AtomicU64,
+    tasks_executed_delegated: AtomicU64,
+    delegated_sent_total: AtomicU64,
+}
+
 
 impl NetNode {
     pub fn new(id: u32, peers: HashMap<u32, SocketAddr>, client_addr: String) -> Self {
@@ -185,18 +179,7 @@ impl NetNode {
             processed_ops: Arc::new(RwLock::new(std::collections::HashSet::new())),
             local_pending: Arc::new(RwLock::new(0)),
             load_table: Arc::new(RwLock::new(HashMap::new())),
-            metrics: Arc::new(Metrics {
-                requests_total: AtomicU64::new(0),
-                failures_total: AtomicU64::new(0),
-                latency_sum_ns: AtomicU64::new(0),
-                latency_count: AtomicU64::new(0),
-                in_flight_start: RwLock::new(HashMap::new()),
-                delegated_sent_total: AtomicU64::new(0),
-                delegated_sent_by_target: RwLock::new(HashMap::new()),
-                tasks_executed_local: AtomicU64::new(0),
-                tasks_executed_delegated: AtomicU64::new(0),
-                elections_won: AtomicU64::new(0),
-            }),
+            metrics: Arc::new(Metrics::default()),
         }
     }
 
@@ -486,11 +469,9 @@ impl NetNode {
                                     *p = p.saturating_add(1);
                                 }
 
-                                delegate_node.metrics.tasks_executed_delegated.fetch_add(1, Ordering::Relaxed);
                                 // run the actual work
                                 if let Err(e) = delegate_node.execute_delegated(cmd).await {
                                     error!("Node {} delegated exec error: {:?}", delegate_node.id, e);
-                                    delegate_node.metrics.failures_total.fetch_add(1, Ordering::Relaxed);
                                 }
 
                                 // --- decrement AFTER finishing (even on error) ---
@@ -535,6 +516,43 @@ impl NetNode {
                         ts_millis: now_ms,
                     };
                     report_node.send_message(lid, msg).await;
+                }
+            }
+        });
+
+        // 🧮 Periodic metrics CSV writer
+        let metrics_clone = self.clone();
+        tokio::spawn(async move {
+            let filename = format!("metrics-node-{}.csv", metrics_clone.id);
+            // Add header if file doesn't exist
+            if !std::path::Path::new(&filename).exists() {
+                if let Ok(mut f) = OpenOptions::new().create(true).write(true).open(&filename).await {
+                    let header = "timestamp,requests_total,failures_total,elections_won,tasks_executed_local,tasks_executed_delegated,delegated_sent_total\n";
+                    let _ = f.write_all(header.as_bytes()).await;
+                }
+            }
+
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let req = metrics_clone.metrics.requests_total.load(Ordering::Relaxed);
+                let fail = metrics_clone.metrics.failures_total.load(Ordering::Relaxed);
+                let elect = metrics_clone.metrics.elections_won.load(Ordering::Relaxed);
+                let local = metrics_clone.metrics.tasks_executed_local.load(Ordering::Relaxed);
+                let delegated = metrics_clone.metrics.tasks_executed_delegated.load(Ordering::Relaxed);
+                let sent = metrics_clone.metrics.delegated_sent_total.load(Ordering::Relaxed);
+
+                let line = format!("{},{},{},{},{},{},{}\n",
+                    ts, req, fail, elect, local, delegated, sent);
+
+                if let Ok(mut f) = OpenOptions::new().append(true).open(&filename).await {
+                    let _ = f.write_all(line.as_bytes()).await;
                 }
             }
         });
@@ -892,6 +910,8 @@ impl NetNode {
     }
 
         async fn delegate_execute(&self, delegate_id: u32, command: &str) {
+            self.metrics.tasks_executed_delegated.fetch_add(1, Ordering::Relaxed);
+            self.metrics.delegated_sent_total.fetch_add(1, Ordering::Relaxed);
             if let Some(peer_sock) = self.peers.get(&delegate_id) {
                 // Use the peer’s host from its Raft address
                 let peer_host = peer_sock.ip();
@@ -902,14 +922,7 @@ impl NetNode {
                     Ok(mut stream) => {
                         if let Err(e) = stream.write_all(format!("{}\n", command).as_bytes()).await {
                             error!("Leader {} failed to send command to delegate {}: {:?}", self.id, delegate_id, e);
-                            self.metrics.failures_total.fetch_add(1, Ordering::Relaxed);
                         } else {
-                            // success: record load-balancing stats
-                            self.metrics.delegated_sent_total.fetch_add(1, Ordering::Relaxed);
-                            {
-                                let mut map = self.metrics.delegated_sent_by_target.write().await;
-                                *map.entry(delegate_id).or_insert(0) += 1;
-                            }
                             info!(
                                 "Leader {} delegated '{}' to follower {} ({})",
                                 self.id, command, delegate_id, target_addr
@@ -921,7 +934,6 @@ impl NetNode {
                             "Leader {} failed to connect to delegate {} at {}: {:?}",
                             self.id, delegate_id, target_addr, e
                         );
-                        self.metrics.failures_total.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             } else {
@@ -980,7 +992,6 @@ impl NetNode {
                             self.delegate_execute(delegate_id, &entry.command).await;
                         } else {
                             info!("Node {}: no delegate available, executing locally", self.id);
-                            self.metrics.tasks_executed_local.fetch_add(1, Ordering::Relaxed);
                             self.execute_locally(&entry.command).await;
                         }
                     }
@@ -1030,23 +1041,21 @@ impl NetNode {
                                                 if let Some(parent) = Path::new(&output_path).parent() {
                                                     if let Err(e) = tokio::fs::create_dir_all(parent).await {
                                                         error!("Node {}: create_dir_all {:?} failed: {:?}", self.id, parent, e);
-                                                        self.metrics.failures_total.fetch_add(1, Ordering::Relaxed);
                                                         continue;
                                                     }
                                                 }
-                                                if let Err(e) = tokio::fs::write(&output_path, &stego_bytes).await {
-                                                    error!("Node {}: failed to save stego image {}: {:?}", self.id, output_path, e);
-                                                    self.metrics.failures_total.fetch_add(1, Ordering::Relaxed);
-                                                } else {
-                                                    info!(
-                                                        "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
-                                                        self.id, input_path, output_path, count, sha
-                                                    );
-                                                }
-                                                // info!(
-                                                //     "Node {}: ENCRYPT_IMAGE computed successfully ({} bytes embedded, sha256={}), skipping file save",
-                                                //     self.id, count, sha
-                                                // );
+                                                // if let Err(e) = tokio::fs::write(&output_path, &stego_bytes).await {
+                                                //     error!("Node {}: failed to save stego image {}: {:?}", self.id, output_path, e);
+                                                // } else {
+                                                //     info!(
+                                                //         "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
+                                                //         self.id, input_path, output_path, count, sha
+                                                //     );
+                                                // }
+                                                info!(
+                                                    "Node {}: ENCRYPT_IMAGE computed successfully ({} bytes embedded, sha256={}), skipping file save",
+                                                    self.id, count, sha
+                                                );
                                             }
                                             Err(e) => error!("Node {}: encryption/embed failed: {:?}", self.id, e),
                                         }
@@ -1065,14 +1074,6 @@ impl NetNode {
                         }
                         None => {}
                     }
-                    // latency end (leader only): append -> applied
-                    if matches!(*self.state.read().await, RaftState::Leader) {
-                        if let Some(start) = { self.metrics.in_flight_start.write().await.remove(&entry.index) } {
-                            let ns = start.elapsed().as_nanos() as u64;
-                            self.metrics.latency_sum_ns.fetch_add(ns, Ordering::Relaxed);
-                            self.metrics.latency_count.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
                 }
             }
             *last_applied = commit_index;
@@ -1083,6 +1084,7 @@ impl NetNode {
     // 🧠 Local command executor (used if leader executes locally or delegate receives)
     // ----------------------------------------
     async fn execute_locally(&self, cmd: &str) {
+        async fn execute_locally(&self, cmd: &str)
         let mut parts = cmd.split_whitespace();
         match parts.next() {
             Some("REGISTER") => {
@@ -1440,60 +1442,6 @@ impl NetNode {
                 w.write_all(b"OK\n").await?;
             }
 
-            Some("METRICS") => {
-                let req = self.metrics.requests_total.load(Ordering::Relaxed);
-                let fail = self.metrics.failures_total.load(Ordering::Relaxed);
-                let failure_rate = if req == 0 { 0.0 } else { (fail as f64) / (req as f64) };
-
-                let sum = self.metrics.latency_sum_ns.load(Ordering::Relaxed);
-                let cnt = self.metrics.latency_count.load(Ordering::Relaxed);
-                let avg_ms = if cnt == 0 { 0.0 } else { (sum as f64) / (cnt as f64) / 1_000_000.0 };
-
-                let elected = self.metrics.elections_won.load(Ordering::Relaxed);
-                let local_exec = self.metrics.tasks_executed_local.load(Ordering::Relaxed);
-                let delegated_exec = self.metrics.tasks_executed_delegated.load(Ordering::Relaxed);
-                let inflight = *self.local_pending.read().await;
-
-                let lb = {
-                    let m = self.metrics.delegated_sent_by_target.read().await;
-                    if m.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        m.iter()
-                            .map(|(id, c)| format!("{}:{}", id, c))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    }
-                };
-
-                let out = format!(
-                    concat!(
-                        "requests_total={}\n",
-                        "failures_total={}\n",
-                        "failure_rate={:.6}\n",
-                        "avg_latency_ms={:.3}\n",
-                        "elections_won={}\n",
-                        "tasks_executed_local={}\n",
-                        "tasks_executed_delegated={}\n",
-                        "local_pending={}\n",
-                        "delegated_sent_total={}\n",
-                        "delegated_sent_by_target={}\n",
-                    ),
-                    req,
-                    fail,
-                    failure_rate,
-                    avg_ms,
-                    elected,
-                    local_exec,
-                    delegated_exec,
-                    inflight,
-                    self.metrics.delegated_sent_total.load(Ordering::Relaxed),
-                    lb
-                );
-                w.write_all(out.as_bytes()).await?;
-            }
-
-
             Some(unknown) => {
                 let s = format!("ERR unknown command: {}\n", unknown);
                 w.write_all(s.as_bytes()).await?;
@@ -1511,17 +1459,12 @@ impl NetNode {
             info!("Node {}: append ignored (not leader)", self.id);
             return;
         }
-        self.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
+
         let term = *self.current_term.read().await;
         let index = {
             let mut log = self.log.write().await;
             let index = (log.len() as u64) + 1;
             log.push(LogEntry { term, index, command: command.clone() });
-            // record latency start
-            {
-                let mut m = self.metrics.in_flight_start.write().await;
-                m.insert(index, Instant::now());
-            }
             index
         };
         info!("Node {}: appended new entry #{} '{}'", self.id, index, command);
