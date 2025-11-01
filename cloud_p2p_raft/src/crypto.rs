@@ -165,17 +165,35 @@ pub fn extract_n_bytes(img: &RgbaImage, n_bytes: usize) -> Result<Vec<u8>> {
 /// 2) parse cipher length, then read exactly that many more bytes,
 /// 3) return (nonce, ciphertext).
 pub fn extract_payload(img: &RgbaImage) -> Result<(Nonce, Vec<u8>)> {
-    // step 1: read header (12 + 4 = 16 bytes)
+    // Read header (12-byte nonce + 4-byte big-endian length)
     let header = extract_n_bytes(img, 16)?;
-    let (nonce, _dummy) = unpack_embed_blob(&header)?;
-    // step 2: read the length to know how many more bytes we need
+    if header.len() != 16 {
+        bail!("header truncated (got {} bytes)", header.len());
+    }
+
+    // Parse nonce and ciphertext length directly (no full-blob unpack yet)
+    let mut nonce_arr = [0u8; 12];
+    nonce_arr.copy_from_slice(&header[..12]);
+    let nonce = *Nonce::from_slice(&nonce_arr);
     let cipher_len = u32::from_be_bytes(header[12..16].try_into().unwrap()) as usize;
 
-    // total we need is 16 + cipher_len
-    let total = 16 + cipher_len;
-    let all = extract_n_bytes(img, total)?;
+    // Sanity check capacity before reading the whole thing
+    let need_total = 16 + cipher_len;
+    let have_bits = img.width() as usize * img.height() as usize * 4;
+    let have_total = have_bits / 8;
+    if need_total > have_total {
+        bail!(
+            "not enough bits in image to extract payload: need {} bytes (~{} bits), have ~{} bytes",
+            need_total,
+            need_total * 8,
+            have_total
+        );
+    }
+
+    // Now read the entire blob (header + ciphertext) and unpack once
+    let all = extract_n_bytes(img, need_total)?;
+    // We can skip re-parsing the nonce, but calling unpack keeps format centralized
     let (nonce2, ciphertext) = unpack_embed_blob(&all)?;
-    // sanity: both nonces should match
     if nonce != nonce2 {
         bail!("nonce mismatch while extracting payload");
     }
@@ -221,4 +239,25 @@ pub fn encrypt_and_embed_to_png(
     let bytes_embedded = payload.len();
 
     Ok((stego_bytes, ct_sha, bytes_embedded))
+}
+
+/// Extracts the embedded payload from a stego PNG and decrypts it with the passphrase.
+/// Returns the original plaintext bytes.
+pub fn extract_and_decrypt_from_png(
+    passphrase: &[u8],
+    stego_png_bytes: &[u8],
+) -> Result<Vec<u8>> {
+    // 1) Decode PNG -> RGBA
+    let rgba = image::load_from_memory(stego_png_bytes)
+        .context("decode stego PNG")?
+        .to_rgba8();
+
+    // 2) Pull out [nonce | len | ciphertext] from LSBs
+    let (nonce, ciphertext) = extract_payload(&rgba)?;
+
+    // 3) Decrypt
+    let plaintext = decrypt_bytes(passphrase, &nonce, &ciphertext)
+        .context("decrypt embedded ciphertext")?;
+
+    Ok(plaintext)
 }

@@ -13,6 +13,10 @@ use tokio::{
     time::sleep,
 };
 
+use cloud_p2p_raft::crypto::{extract_payload, decrypt_bytes};
+use image::GenericImageView; // (not strictly needed, but fine to keep)
+
+
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
@@ -90,7 +94,7 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
 
     // Present a simple banner (your proxy protocol)
     w.write_all(b"Welcome to Cloud P2P Proxy!\n").await?;
-    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output>\n").await?;
+    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
 
     loop {
         line.clear();
@@ -218,6 +222,61 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
             let resp = submit_idempotent(&seeds, &cfg, &payload).await;
             write_line(&mut w, resp).await?;
         }
+        "DECRYPT_IMAGE" => {
+        // Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>
+        let pass = match parts.next() {
+            Some(x) => x,
+            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
+        };
+        let stego_path = match parts.next() {
+            Some(x) => x,
+            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
+        };
+        let output_path = match parts.next() {
+            Some(x) => x,
+            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
+        };
+
+        // Read the stego PNG
+        let bytes = match fs::read(stego_path) {
+            Ok(b) => b,
+            Err(e) => { w.write_all(format!("ERR read stego: {e}\n").as_bytes()).await?; continue; }
+        };
+
+        // Decode image -> RGBA
+        let img = match image::load_from_memory(&bytes) {
+            Ok(i) => i.to_rgba8(),
+            Err(e) => { w.write_all(format!("ERR decode stego PNG: {e}\n").as_bytes()).await?; continue; }
+        };
+
+        // Extract payload (nonce + ciphertext)
+        let (nonce, ciphertext) = match extract_payload(&img) {
+            Ok(t) => t,
+            Err(e) => { w.write_all(format!("ERR extract payload: {e}\n").as_bytes()).await?; continue; }
+        };
+
+        // Decrypt
+        let plaintext = match decrypt_bytes(pass.as_bytes(), &nonce, &ciphertext) {
+            Ok(p) => p,
+            Err(e) => { w.write_all(format!("ERR decrypt embedded ciphertext: {e}\n").as_bytes()).await?; continue; }
+        };
+
+        // Ensure output dir exists
+        if let Some(parent) = Path::new(output_path).parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                w.write_all(format!("ERR create_dir_all {:?}: {e}\n", parent).as_bytes()).await?;
+                continue;
+            }
+        }
+
+        // Write recovered bytes
+        if let Err(e) = fs::write(output_path, &plaintext) {
+            w.write_all(format!("ERR write output: {e}\n").as_bytes()).await?;
+            continue;
+        }
+
+        w.write_all(b"OK\n").await?;
+    }
             _ => {
                 w.write_all(format!("ERR unknown command: {}\n", cmd).as_bytes()).await?;
             }

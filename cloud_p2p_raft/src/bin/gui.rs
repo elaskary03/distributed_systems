@@ -1,6 +1,6 @@
 use axum::{
     extract::{Multipart, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
@@ -16,6 +16,9 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 use rand_core::{OsRng, RngCore};
+
+// 🔐 client-side decryption uses the same helpers as the cluster
+use cloud_p2p_raft::crypto::{decrypt_bytes, extract_payload};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Cloud P2P GUI (talks to the existing Proxy)")]
@@ -33,6 +36,7 @@ struct Args {
 struct AppState {
     proxy_addr: Arc<String>,
     uploads_dir: Arc<PathBuf>,
+    stego_dir: Arc<PathBuf>,   // NEW: serve and scan the stego/ folder
 }
 
 /* =========================
@@ -56,6 +60,9 @@ struct UploadResp {
     status: String,
 }
 
+#[derive(Serialize)]
+struct FindStegoResp { stego_path: String }
+
 /* =========================
    main
    ========================= */
@@ -64,17 +71,26 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let uploads_dir = PathBuf::from("uploads");
+    let stego_dir = PathBuf::from("stego"); // NEW
     fs::create_dir_all(&uploads_dir).ok();
+    fs::create_dir_all(&stego_dir).ok();   // NEW
 
     let state = AppState {
         proxy_addr: Arc::new(args.proxy_addr),
         uploads_dir: Arc::new(uploads_dir),
+        stego_dir: Arc::new(stego_dir),    // NEW
     };
 
-    let files_router = Router::new().nest_service(
-        "/uploads",
-        ServeDir::new("uploads").append_index_html_on_directories(false),
-    );
+    // Serve both /files/uploads/* and /files/stego/* (so the browser can download them)
+    let files_router = Router::new()
+        .nest_service(
+            "/uploads",
+            ServeDir::new("uploads").append_index_html_on_directories(false),
+        )
+        .nest_service(
+            "/stego",
+            ServeDir::new("stego").append_index_html_on_directories(false),
+        );
 
     let app = Router::new()
         .route("/", get(ui))
@@ -84,6 +100,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/users", get(api_users))
         .route("/api/list", get(api_list))
         .route("/api/upload", post(api_upload))
+        .route("/api/decrypt", post(api_decrypt))         // client-side decrypt
+        .route("/api/find-stego", get(api_find_stego))    // stego discovery for auto-download
         .nest("/files", files_router)
         .with_state(state);
 
@@ -131,7 +149,6 @@ async fn ui() -> impl IntoResponse {
     h1{ margin:0 0 6px; font-size: 28px; line-height: 1.2; }
     .sub{ color: var(--muted); margin-bottom: 18px; }
 
-    /* grid that never overlaps */
     .grid{
       display: grid;
       gap: 16px;
@@ -222,7 +239,7 @@ async fn ui() -> impl IntoResponse {
           </div>
         </form>
         <div id="uploadOut" class="out"></div>
-        <div class="hint">Encrypted image will be saved as <span class="pill">stego/&lt;image_id&gt;.png</span> (per your proxy/node paths).</div>
+        <div class="hint">Encrypted image will be saved under <span class="pill">uploads/</span> or <span class="pill">stego/</span> by the cluster. The GUI will auto-download it once detected.</div>
       </section>
 
       <section>
@@ -273,11 +290,49 @@ async fn ui() -> impl IntoResponse {
         </div>
       </section>
     </div>
+
+    <!-- Third row: Client-side Decrypt -->
+    <div class="grid">
+      <section>
+        <h2>🗝️ Decrypt Local Image <span class="badge">client-side</span></h2>
+        <form id="decryptForm">
+          <div class="row">
+            <div>
+              <label>Stego image (PNG/JPEG)</label>
+              <input type="file" name="file" accept="image/png,image/jpeg" required>
+            </div>
+            <div>
+              <label>Passphrase</label>
+              <input type="password" name="passphrase" placeholder="the same key you used" required>
+            </div>
+          </div>
+          <div style="margin-top:12px" class="btns">
+            <button type="submit">Decrypt & Download Payload</button>
+          </div>
+        </form>
+        <div id="decryptOut" class="out"></div>
+        <div class="hint">Runs on the GUI server (not the cluster). If the payload is an image, it downloads with the right extension; otherwise falls back to <span class="pill">decrypted.bin</span>.</div>
+      </section>
+    </div>
   </div>
 
   <script>
     const $ = sel => document.querySelector(sel);
     const text = (id, s) => ($(id).textContent = s);
+
+    // Ask the server to locate the stego file path for this image_id
+    async function pollFindStego(imageId, timeoutMs = 15000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const res = await fetch('/api/find-stego?image_id=' + encodeURIComponent(imageId));
+        if (res.ok) {
+          const json = await res.json();
+          return json.stego_path; // /files/uploads/<..> or /files/stego/<..>
+        }
+        await new Promise(r => setTimeout(r, 600));
+      }
+      return null;
+    }
 
     /* Upload & ENCRYPT_ON_CLOUD */
     $('#uploadForm').addEventListener('submit', async (e) => {
@@ -288,6 +343,20 @@ async fn ui() -> impl IntoResponse {
         if (!res.ok) { text('#uploadOut', await res.text()); return; }
         const json = await res.json();
         text('#uploadOut', JSON.stringify(json, null, 2));
+
+        // Try to find the stego file and download it
+        const imageId = json.image_id;
+        const stegoPath = await pollFindStego(imageId);
+        if (stegoPath) {
+          const a = document.createElement('a');
+          a.href = stegoPath;
+          const fileBase = stegoPath.split('/').pop() || `stego-${imageId}.png`;
+          a.download = fileBase;
+          a.click();
+          text('#uploadOut', JSON.stringify(json, null, 2) + `\n✅ Stego downloaded: ${fileBase}`);
+        } else {
+          text('#uploadOut', JSON.stringify(json, null, 2) + `\n⚠️ Stego not found yet for ${imageId}`);
+        }
       } catch (err) { text('#uploadOut', String(err)); }
     });
 
@@ -337,6 +406,35 @@ async fn ui() -> impl IntoResponse {
       try { text('#leaderOut', await (await fetch('/api/leader')).text()); }
       catch (err) { text('#leaderOut', String(err)); }
     });
+
+    /* Client-side Decrypt */
+    $('#decryptForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      try {
+        const res = await fetch('/api/decrypt', { method: 'POST', body: fd });
+        if (!res.ok) {
+          text('#decryptOut', await res.text());
+          return;
+        }
+        const blob = await res.blob();
+        // Use server-provided filename if present
+        const cd = res.headers.get('Content-Disposition') || '';
+        let fname = 'decrypted.bin';
+        const m = cd.match(/filename="([^"]+)"/i);
+        if (m) fname = m[1];
+
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fname;
+        a.click();
+        URL.revokeObjectURL(url);
+        text('#decryptOut', '✅ Decryption successful — file downloaded as ' + fname);
+      } catch (err) {
+        text('#decryptOut', '❌ ' + err);
+      }
+    });
   </script>
 </body>
 </html>
@@ -384,7 +482,7 @@ async fn api_list(State(st): State<AppState>) -> impl IntoResponse {
 }
 
 /* =========================
-   Upload handler
+   Upload handler (encrypt-on-cloud trigger)
    ========================= */
 async fn api_upload(
     State(st): State<AppState>,
@@ -438,6 +536,118 @@ async fn api_upload(
     };
 
     (status, Json(resp)).into_response()
+}
+
+/* =========================
+   Find stego path for an image_id (search both uploads/ and stego/)
+   ========================= */
+async fn api_find_stego(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(image_id) = q.get("image_id").cloned() else {
+        return (StatusCode::BAD_REQUEST, "missing image_id").into_response();
+    };
+
+    // Helper to scan a directory and return a served path prefix
+    async fn scan_dir_for_id(dir: &PathBuf, web_prefix: &str, image_id: &str) -> Option<String> {
+        if let Ok(mut rd) = tokio_fs::read_dir(dir).await {
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let lower = name.to_lowercase();
+                if lower.contains(&image_id.to_lowercase())
+                    && (lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg"))
+                {
+                    return Some(format!("{}/{}", web_prefix, name));
+                }
+            }
+        }
+        None
+    }
+
+    // 1) search uploads/
+    if let Some(p) = scan_dir_for_id(&st.uploads_dir, "/files/uploads", &image_id).await {
+        return (StatusCode::OK, Json(FindStegoResp { stego_path: p })).into_response();
+    }
+    // 2) search stego/
+    if let Some(p) = scan_dir_for_id(&st.stego_dir, "/files/stego", &image_id).await {
+        return (StatusCode::OK, Json(FindStegoResp { stego_path: p })).into_response();
+    }
+
+    (StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+/* =========================
+   Client-side Decrypt handler
+   ========================= */
+async fn api_decrypt(
+    mut mp: Multipart,
+) -> impl IntoResponse {
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut passphrase: Option<String> = None;
+
+    while let Ok(Some(field)) = mp.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            match field.bytes().await {
+                Ok(b) if !b.is_empty() => file_bytes = Some(b.to_vec()),
+                _ => return (StatusCode::BAD_REQUEST, "empty file").into_response(),
+            }
+        } else if name == "passphrase" {
+            passphrase = Some(field.text().await.unwrap_or_default());
+        }
+    }
+
+    let bytes = match file_bytes {
+        Some(b) => b,
+        None => return (StatusCode::BAD_REQUEST, "missing file").into_response(),
+    };
+    let pass = passphrase.unwrap_or_default();
+
+    // Decode the uploaded stego image to RGBA8
+    let img_rgba = match image::load_from_memory(&bytes) {
+        Ok(i) => i.to_rgba8(),
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("decode image: {e}")).into_response(),
+    };
+
+    // Extract (nonce, ciphertext) from LSBs and decrypt
+    let (nonce, ciphertext) = match extract_payload(&img_rgba) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("extract payload: {e}")).into_response(),
+    };
+
+    let plaintext = match decrypt_bytes(pass.as_bytes(), &nonce, &ciphertext) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("decrypt: {e}")).into_response(),
+    };
+
+    // Try to detect if plaintext is an image; set correct headers and filename
+    let (content_type, filename) = match image::guess_format(&plaintext) {
+        Ok(fmt) => {
+            use image::ImageFormat::*;
+            let (ct, ext) = match fmt {
+                Png  => ("image/png",  "png"),
+                Jpeg => ("image/jpeg", "jpg"),
+                Gif  => ("image/gif",  "gif"),
+                Bmp  => ("image/bmp",  "bmp"),
+                Tiff => ("image/tiff", "tiff"),
+                Ico  => ("image/x-icon","ico"),
+                WebP => ("image/webp", "webp"),
+                Avif => ("image/avif", "avif"),
+                _    => ("application/octet-stream", "bin"),
+            };
+            (ct.to_string(), format!("decrypted.{}", ext))
+        }
+        Err(_) => ("application/octet-stream".to_string(), "decrypted.bin".to_string()),
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(&content_type).unwrap());
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename)).unwrap(),
+    );
+    (StatusCode::OK, headers, plaintext).into_response()
 }
 
 /* =========================
