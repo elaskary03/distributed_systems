@@ -13,6 +13,8 @@ use tracing::{debug, info, error};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
 use std::path::Path;
+use rand::seq::IteratorRandom;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -71,6 +73,12 @@ pub enum RaftMessage {
         sender_id: u32,
         success: bool,
     },
+    LoadReport {
+        from_id: u32,
+        pending: u32,
+        ts_millis: u128,
+    },
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +123,8 @@ struct NetNode {
     registered_users: Arc<RwLock<HashMap<String, String>>>,
     // Idempotency for broadcasted client requests
     processed_ops: Arc<RwLock<std::collections::HashSet<String>>>,
-
+    local_pending: Arc<RwLock<u32>>,                         // how many delegated tasks this node is executing now
+    load_table: Arc<RwLock<HashMap<u32, (u32, u128)>>>,
 }
 
 impl NetNode {
@@ -148,6 +157,9 @@ impl NetNode {
             leader_hint: Arc::new(RwLock::new(None)),
             registered_users: Arc::new(RwLock::new(HashMap::new())),
             processed_ops: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            local_pending: Arc::new(RwLock::new(0)),
+            load_table: Arc::new(RwLock::new(HashMap::new())),
+
         }
     }
 
@@ -169,6 +181,11 @@ impl NetNode {
 
     fn client_addr_for(id: u32) -> String {
         format!("127.0.0.1:{}", 9000 + id)
+    }
+
+    async fn execute_delegated(&self, cmd: &str) -> anyhow::Result<()> {
+        self.execute_locally(cmd).await;
+        Ok(())
     }
 
     async fn forward_to_leader(&self, cmd_line: &str) -> anyhow::Result<String> {
@@ -403,6 +420,83 @@ impl NetNode {
             }
         });
 
+        // 🔁 Start delegate listener (for followers to receive delegated commands)
+        let delegate_node = self.clone();
+        tokio::spawn(async move {
+            let port = 9100 + delegate_node.id;
+            let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
+                .parse()
+                .expect("parse delegate addr");
+            let listener = TcpListener::bind(addr)
+                .await
+                .expect("delegate bind failed");
+            info!("🧩 Node {} delegate listener on {}", delegate_node.id, addr);
+
+                loop {
+                    match listener.accept().await {
+                        Ok((mut stream, _)) => {
+                            let mut buf = String::new();
+                            let mut reader = BufReader::new(&mut stream);
+                            if let Ok(_) = reader.read_line(&mut buf).await {
+                                let cmd = buf.trim();
+                                info!("Node {} received delegated command: {}", delegate_node.id, cmd);
+                                // --- bump local load BEFORE starting ---
+                                {
+                                    let mut p = delegate_node.local_pending.write().await;
+                                    *p = p.saturating_add(1);
+                                }
+
+                                // run the actual work
+                                if let Err(e) = delegate_node.execute_delegated(cmd).await {
+                                    error!("Node {} delegated exec error: {:?}", delegate_node.id, e);
+                                }
+
+                                // --- decrement AFTER finishing (even on error) ---
+                                {
+                                    let mut p = delegate_node.local_pending.write().await;
+                                    *p = p.saturating_sub(1);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Delegate listener error: {:?}", e);
+                        }
+                    }
+                }
+            });
+
+        // 🔄 periodic load reporter
+        let report_node = self.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_millis(1200)).await;
+
+                // capture current pending
+                let pending = *report_node.local_pending.read().await;
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+
+                // If I'm leader, write my own value into the table.
+                if matches!(*report_node.state.read().await, RaftState::Leader) {
+                    let mut t = report_node.load_table.write().await;
+                    t.insert(report_node.id, (pending, now_ms));
+                    continue;
+                }
+
+                // If I'm follower and know the leader, send LoadReport to leader.
+                if let Some(lid) = *report_node.leader_hint.read().await {
+                    let msg = RaftMessage::LoadReport {
+                        from_id: report_node.id,
+                        pending,
+                        ts_millis: now_ms,
+                    };
+                    report_node.send_message(lid, msg).await;
+                }
+            }
+        });
+
         Ok(())
     }
 
@@ -605,6 +699,22 @@ impl NetNode {
                     }
                 }
             }
+
+            RaftMessage::LoadReport { from_id, pending, ts_millis } => {
+                // Only the leader needs to track load from others
+                if matches!(*self.state.read().await, RaftState::Leader) {
+                    let mut t = self.load_table.write().await;
+                    t.insert(from_id, (pending, ts_millis));
+                    // Also keep the leader’s own entry fresh
+                    let my_pending = *self.local_pending.read().await;
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    t.insert(self.id, (my_pending, now_ms));
+                    debug!("Leader {} updated load_table from {} => pending={}", self.id, from_id, pending);
+                }
+            }
         }
     }
 
@@ -726,6 +836,68 @@ impl NetNode {
         false
     }
 
+    // ----------------------------------------
+    // 🔀 Delegation helpers
+    // ----------------------------------------
+    async fn pick_delegate(&self) -> Option<u32> {
+        // Prefer least-loaded follower with a fresh (<= 5s) report
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let fresh_cutoff = 5_000u128;
+
+        let table = self.load_table.read().await;
+        let mut best: Option<(u32, u32)> = None; // (id, pending)
+
+        for (&peer_id, &(pending, ts)) in table.iter() {
+            if peer_id == self.id {
+                continue; // do not delegate to self
+            }
+            if !self.peers.contains_key(&peer_id) {
+                continue; // must be a configured peer
+            }
+            if now_ms.saturating_sub(ts) > fresh_cutoff {
+                continue; // stale sample
+            }
+            match best {
+                None => best = Some((peer_id, pending)),
+                Some((_bid, bpend)) if pending < bpend => best = Some((peer_id, pending)),
+                _ => {}
+            }
+        }
+
+        if let Some((id, _)) = best {
+            return Some(id);
+        }
+
+        // Fallback: random follower if no fresh data
+        let mut rng = rand::thread_rng();
+        self.peers.keys().copied().filter(|i| *i != self.id).choose(&mut rng)
+    }
+
+    async fn delegate_execute(&self, delegate_id: u32, command: &str) {
+        if let Some(addr) = self.peers.get(&delegate_id) {
+            let port = 9100 + delegate_id; // delegate TCP port (choose any free range)
+            let target_addr = format!("127.0.0.1:{}", port);
+            if let Ok(mut stream) = TcpStream::connect(&target_addr).await {
+                let _ = stream
+                    .write_all(format!("{}\n", command).as_bytes())
+                    .await;
+                info!(
+                    "Leader {} delegated '{}' to follower {} ({})",
+                    self.id, command, delegate_id, target_addr
+                );
+            } else {
+                error!(
+                    "Leader {} failed to connect to delegate {}",
+                    self.id, delegate_id
+                );
+            }
+        }
+    }
+
+
     // 🔁 Rebuilds the in-memory state machine (e.g., registered_users) from the committed log
     async fn rebuild_state_from_log(&self) {
         let log = self.log.read().await;
@@ -733,7 +905,7 @@ impl NetNode {
 
         info!("Node {} rebuilding state from {} committed entries", self.id, commit_index);
 
-        self.registered_users.write().await.clear();
+       //self.registered_users.write().await.clear();
 
         for i in 0..commit_index {
             if let Some(entry) = log.get(i as usize) {
@@ -770,10 +942,20 @@ impl NetNode {
             let log = self.log.read().await;
             for i in (*last_applied + 1)..=commit_index {
                 if let Some(entry) = log.get(i as usize - 1) {
-                    if !matches!(*self.state.read().await, RaftState::Leader) {
-                        info!("Node {} (follower) skipping execution of {}", self.id, entry.command);
-                        continue;
+                    // Only leaders delegate execution
+                    if matches!(*self.state.read().await, RaftState::Leader) {
+                        // Leader chooses delegate node
+                        if let Some(delegate_id) = self.pick_delegate().await {
+                            self.delegate_execute(delegate_id, &entry.command).await;
+                        } else {
+                            info!("Node {}: no delegate available, executing locally", self.id);
+                            self.execute_locally(&entry.command).await;
+                        }
                     }
+                    // } else {
+                    //     // Followers do not execute directly
+                    //     info!("Node {} (follower) skipping execution of {}", self.id, entry.command);
+                    // }
                     let mut parts = entry.command.split_whitespace();
                     match parts.next() {
                         Some("REGISTER") => {
@@ -850,6 +1032,49 @@ impl NetNode {
             *last_applied = commit_index;
         }
     }
+
+        // ----------------------------------------
+    // 🧠 Local command executor (used if leader executes locally or delegate receives)
+    // ----------------------------------------
+    async fn execute_locally(&self, cmd: &str) {
+        let mut parts = cmd.split_whitespace();
+        match parts.next() {
+            Some("REGISTER") => {
+                if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
+                    self.registered_users
+                        .write()
+                        .await
+                        .insert(user.to_string(), ip.to_string());
+                    info!("Node {} executed REGISTER {} {}", self.id, user, ip);
+                }
+            }
+            Some("UNREGISTER") => {
+                if let Some(user) = parts.next() {
+                    self.registered_users.write().await.remove(user);
+                    info!("Node {} executed UNREGISTER {}", self.id, user);
+                }
+            }
+            Some("ENCRYPT_IMAGE") => {
+                // Reuse your existing ENCRYPT_IMAGE logic
+                let args: Vec<_> = parts.collect();
+                if args.len() == 4 {
+                    let (_id, pass, inp, out) = (
+                        args[0],
+                        args[1],
+                        args[2],
+                        args[3],
+                    );
+                    info!("Node {} executing ENCRYPT_IMAGE {} -> {}", self.id, inp, out);
+                    // (copy your existing ENCRYPT_IMAGE encryption block here)
+                } else {
+                    error!("Malformed ENCRYPT_IMAGE command: '{}'", cmd);
+                }
+            }
+            Some(other) => info!("Node {}: Unknown command '{}'", self.id, other),
+            None => {}
+        }
+    }
+
 
     async fn heartbeat_loop(&self) {
         loop {
