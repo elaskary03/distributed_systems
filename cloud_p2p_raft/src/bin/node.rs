@@ -129,7 +129,7 @@ struct NetNode {
 }
 
 impl NetNode {
-    pub fn new(id: u32, peers: HashMap<u32, SocketAddr>) -> Self {
+    pub fn new(id: u32, peers: HashMap<u32, SocketAddr>, client_addr: String) -> Self {
         let peers_arc = Arc::new(peers);
         let peer_ids: Vec<u32> = peers_arc.keys().cloned().collect();
         
@@ -418,8 +418,6 @@ impl NetNode {
         let client_node = self.clone();
         tokio::spawn(async move {
             let client_addr: std::net::SocketAddr = client_node.client_addr.parse().expect("parse client addr");
-                .parse()
-                .expect("parse client addr");
             if let Err(e) = client_node.run_client_api(client_addr).await {
                 error!("client API failed: {:?}", e);
             }
@@ -427,11 +425,16 @@ impl NetNode {
 
         // 🔁 Start delegate listener (for followers to receive delegated commands)
         let delegate_node = self.clone();
+        let self_clone = self.clone(); // ✅ clone before the spawn
         tokio::spawn(async move {
             let port = 9100 + delegate_node.id;
-            let addr: std::net::SocketAddr = format!("{}:{}", self.client_addr.split(':').next().unwrap(), port)
-                .parse()
-                .expect("parse delegate addr");
+            let addr: std::net::SocketAddr = format!(
+                "{}:{}",
+                self_clone.client_addr.split(':').next().unwrap(),
+                port
+            )
+            .parse()
+            .expect("parse delegate addr");
             let listener = TcpListener::bind(addr)
                 .await
                 .expect("delegate bind failed");
@@ -1472,7 +1475,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let listen: SocketAddr = args.addr.parse()?;
-    let node = Arc::new(NetNode::new(args.id, peers_map));
+    let node = Arc::new(NetNode::new(args.id, peers_map, args.client_addr.clone()));
     node.clone().start(listen).await?;
     // keep alive
     loop { sleep(Duration::from_secs(3600)).await; }
