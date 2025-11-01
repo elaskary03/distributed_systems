@@ -15,6 +15,7 @@ use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
 use std::path::Path;
 use rand::seq::IteratorRandom;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -126,6 +127,7 @@ struct NetNode {
     local_pending: Arc<RwLock<u32>>,                         // how many delegated tasks this node is executing now
     load_table: Arc<RwLock<HashMap<u32, (u32, u128)>>>,
     client_addr: String,
+    delegate_counter: AtomicU32,
 }
 
 impl NetNode {
@@ -161,7 +163,7 @@ impl NetNode {
             processed_ops: Arc::new(RwLock::new(std::collections::HashSet::new())),
             local_pending: Arc::new(RwLock::new(0)),
             load_table: Arc::new(RwLock::new(HashMap::new())),
-
+            delegate_counter: AtomicU32::new(0),
         }
     }
 
@@ -845,41 +847,15 @@ impl NetNode {
     // 🔀 Delegation helpers
     // ----------------------------------------
     async fn pick_delegate(&self) -> Option<u32> {
-        // Prefer least-loaded follower with a fresh (<= 5s) report
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let fresh_cutoff = 5_000u128;
-
-        let table = self.load_table.read().await;
-        let mut best: Option<(u32, u32)> = None; // (id, pending)
-
-        for (&peer_id, &(pending, ts)) in table.iter() {
-            if peer_id == self.id {
-                continue; // do not delegate to self
-            }
-            if !self.peers.contains_key(&peer_id) {
-                continue; // must be a configured peer
-            }
-            if now_ms.saturating_sub(ts) > fresh_cutoff {
-                continue; // stale sample
-            }
-            match best {
-                None => best = Some((peer_id, pending)),
-                Some((_bid, bpend)) if pending < bpend => best = Some((peer_id, pending)),
-                _ => {}
-            }
+        let peers: Vec<u32> = self.peers.keys().copied().filter(|id| *id != self.id).collect();
+        if peers.is_empty() {
+            return None;
         }
 
-        if let Some((id, _)) = best {
-            return Some(id);
-        }
-
-        // Fallback: random follower if no fresh data
-        let mut rng = rand::thread_rng();
-        self.peers.keys().copied().filter(|i| *i != self.id).choose(&mut rng)
+        let idx = self.delegate_counter.fetch_add(1, Ordering::Relaxed) as usize % peers.len();
+        Some(peers[idx])
     }
+
 
         async fn delegate_execute(&self, delegate_id: u32, command: &str) {
             if let Some(peer_sock) = self.peers.get(&delegate_id) {
