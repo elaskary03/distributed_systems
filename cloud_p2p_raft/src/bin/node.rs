@@ -717,6 +717,11 @@ impl NetNode {
         let mut last_applied = self.last_applied.write().await;
 
         if commit_index > *last_applied {
+            // Only the leader executes commands
+            if !matches!(*self.state.read().await, RaftState::Leader) {
+                *last_applied = commit_index;
+                return;
+            }
             let log = self.log.read().await;
             for i in (*last_applied + 1)..=commit_index {
                 if let Some(entry) = log.get(i as usize - 1) {
