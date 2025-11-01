@@ -1,6 +1,6 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -8,29 +8,38 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
-use futures::{StreamExt, SinkExt};
-use tracing::{debug, info, error};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
-use std::path::Path;
+use futures::{SinkExt, StreamExt};
+use tracing::{debug, error, info};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use anyhow::Result;
+use rand::random;
 
+/// ─────────────────────────────────────────────────────────────────────────────
+/// CLI
+/// ─────────────────────────────────────────────────────────────────────────────
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Node id
+    /// Node id (unique per node)
     #[arg(long)]
     id: u32,
-    /// Listen address (e.g. "192.168.1.100:7001")
+
+    /// Listen address for node-to-node RPC (e.g. "127.0.0.1:7001")
     #[arg(long)]
     addr: String,
-    /// Peers list: comma separated id=addr (e.g. "2=192.168.1.101:7002,3=192.168.1.102:7003")
+
+    /// Peers list: comma-separated id=addr (e.g. "2=127.0.0.1:7002,3=127.0.0.1:7003")
     #[arg(long)]
     peers: String,
-    /// Client API listen address (e.g. "0.0.0.0:9001")
+
+    /// Client API listen address (default auto-maps to 9000+id)
     #[arg(long, default_value = "127.0.0.1:9000")]
     client_addr: String,
 }
 
+/// ─────────────────────────────────────────────────────────────────────────────
+/// Raft data types
+/// ─────────────────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RaftState {
     Follower,
@@ -73,62 +82,48 @@ pub enum RaftMessage {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum ClientRequest {
-    /// { "type": "Submit", "command": "your string command" }
-    Submit { command: String },
-    /// { "type": "GetLeader" }
-    GetLeader,
-    /// { "type": "GetState" }
-    GetState,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum ClientResponse {
-    Ok,
-    NotLeader { leader_id: Option<u32> },
-    Leader { id: u32 },
-    State { role: String, term: u64, commit_index: u64 },
-    Error { message: String },
-}
-
-
+/// ─────────────────────────────────────────────────────────────────────────────
+/// NetNode
+/// ─────────────────────────────────────────────────────────────────────────────
 #[derive(Clone)]
 struct NetNode {
     id: u32,
     state: Arc<RwLock<RaftState>>,
     current_term: Arc<RwLock<u64>>,
     voted_for: Arc<RwLock<Option<u32>>>,
+
     peers: Arc<HashMap<u32, SocketAddr>>,
     outbound: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RaftMessage>>>>,
+
     last_heartbeat: Arc<RwLock<Instant>>,
     votes_received: Arc<RwLock<HashMap<u64, HashMap<u32, bool>>>>,
+
     log: Arc<RwLock<Vec<LogEntry>>>,
     commit_index: Arc<RwLock<u64>>,
     last_applied: Arc<RwLock<u64>>,
     next_index: Arc<RwLock<HashMap<u32, u64>>>,
     match_index: Arc<RwLock<HashMap<u32, u64>>>,
-    // Hint for who is leader (updated when we receive AppendEntries)
-    leader_hint: Arc<RwLock<Option<u32>>>,
-    registered_users: Arc<RwLock<HashMap<String, String>>>,
-    // Idempotency for broadcasted client requests
-    processed_ops: Arc<RwLock<std::collections::HashSet<String>>>,
 
+    leader_hint: Arc<RwLock<Option<u32>>>,
+
+    // application state
+    kv: Arc<RwLock<HashMap<String, String>>>,
+    processed_ops: Arc<RwLock<HashSet<String>>>,
+    registered_users: Arc<RwLock<HashMap<String, String>>>, // user -> ip
+
+    // Quiescent-mode controls
+    election_armed: Arc<RwLock<bool>>,          // false until a client request arrives
+    last_client_activity: Arc<RwLock<Instant>>, // refreshed by client requests & leader writes
+    inactivity_timeout: Duration,               // step-down window (default 10s)
 }
 
 impl NetNode {
-    pub fn new(id: u32, peers: HashMap<u32, SocketAddr>) -> Self {
-        let peers_arc = Arc::new(peers);
-        let peer_ids: Vec<u32> = peers_arc.keys().cloned().collect();
-        
-        // Initialize next_index and match_index for all peers
+    fn new(id: u32, peers: HashMap<u32, SocketAddr>) -> Self {
         let mut next_index = HashMap::new();
         let mut match_index = HashMap::new();
-        for peer_id in peer_ids {
-            next_index.insert(peer_id, 1);  // Initialize to 1 (will be updated when becoming leader)
-            match_index.insert(peer_id, 0);  // Initialize to 0 for new leaders
+        for (&pid, _) in peers.iter() {
+            next_index.insert(pid, 1);
+            match_index.insert(pid, 0);
         }
 
         Self {
@@ -136,443 +131,313 @@ impl NetNode {
             state: Arc::new(RwLock::new(RaftState::Follower)),
             current_term: Arc::new(RwLock::new(0)),
             voted_for: Arc::new(RwLock::new(None)),
-            peers: peers_arc,
+
+            peers: Arc::new(peers),
             outbound: Arc::new(Mutex::new(HashMap::new())),
+
             last_heartbeat: Arc::new(RwLock::new(Instant::now())),
             votes_received: Arc::new(RwLock::new(HashMap::new())),
+
             log: Arc::new(RwLock::new(Vec::new())),
             commit_index: Arc::new(RwLock::new(0)),
             last_applied: Arc::new(RwLock::new(0)),
             next_index: Arc::new(RwLock::new(next_index)),
             match_index: Arc::new(RwLock::new(match_index)),
-            leader_hint: Arc::new(RwLock::new(None)),
-            registered_users: Arc::new(RwLock::new(HashMap::new())),
-            processed_ops: Arc::new(RwLock::new(std::collections::HashSet::new())),
-        }
-    }
 
-    #[inline]
-    fn clamp1(n: u64) -> u64 {
-        if n == 0 { 1 } else { n }
+            leader_hint: Arc::new(RwLock::new(None)),
+
+            kv: Arc::new(RwLock::new(HashMap::new())),
+            processed_ops: Arc::new(RwLock::new(HashSet::new())),
+            registered_users: Arc::new(RwLock::new(HashMap::new())),
+
+            election_armed: Arc::new(RwLock::new(false)),
+            last_client_activity: Arc::new(RwLock::new(Instant::now())),
+            inactivity_timeout: Duration::from_secs(10),
+        }
     }
 
     #[inline]
     fn prev_ptr(next_index: u64, log: &[LogEntry]) -> (u64, u64) {
-        let prev_log_index = next_index.saturating_sub(1); // never underflow
-        let prev_log_term = if prev_log_index == 0 {
-            0
-        } else {
-            log.get(prev_log_index as usize - 1).map(|e| e.term).unwrap_or(0)
-        };
-        (prev_log_index, prev_log_term)
+        if next_index <= 1 {
+            return (0, 0);
+        }
+        let prev = (next_index - 1) as usize;
+        let prev_term = log.get(prev - 1).map_or(0, |e| e.term);
+        (prev as u64, prev_term)
     }
 
-    fn client_addr_for(id: u32) -> String {
-        format!("127.0.0.1:{}", 9000 + id)
-    }
-
-    async fn forward_to_leader(&self, cmd_line: &str) -> anyhow::Result<String> {
-    let lid = (*self.leader_hint.read().await)
-        .ok_or_else(|| anyhow::anyhow!("no leader hint"))?;
-    let addr = NetNode::client_addr_for(lid);
-
-    let stream = TcpStream::connect(addr).await?;
-    let (r, mut w) = stream.into_split();
-    let mut reader = BufReader::new(r);
-
-    // read banner (2 lines)
-    let mut tmp = String::new();
-    reader.read_line(&mut tmp).await?;
-    tmp.clear();
-    reader.read_line(&mut tmp).await?;
-
-    // send the forwarded command
-    w.write_all(cmd_line.as_bytes()).await?;
-    w.write_all(b"\n").await?;
-
-    // read a short burst of response lines (handles multi-line commands)
-    use tokio::time::{timeout, Duration};
-    let mut out = String::new();
-
-    // read first line (block up to 500ms)
-    let mut buf = String::new();
-    match timeout(Duration::from_millis(500), reader.read_line(&mut buf)).await {
-        Ok(Ok(n)) if n > 0 => out.push_str(&buf),
-        _ => return Ok(out), // nothing
-    }
-
-    // then keep grabbing lines while they arrive quickly
-    loop {
-        buf.clear();
-        match timeout(Duration::from_millis(120), reader.read_line(&mut buf)).await {
-            Ok(Ok(n)) if n > 0 => out.push_str(&buf),
-            _ => break,
+    /// Quiet writes to client sockets (suppress common disconnect errors)
+    async fn write_quiet(
+        w: &mut tokio::net::tcp::OwnedWriteHalf,
+        bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        use std::io::ErrorKind;
+        match w.write_all(bytes).await {
+            Ok(_) => Ok(()),
+            Err(e) if matches!(
+                e.kind(),
+                ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::UnexpectedEof
+            ) => Ok(()),
+            Err(e) => Err(e.into()),
         }
     }
 
-    Ok(out)
-}
+    /// ─────────────────────────────────────────────────────────────────────────
+    /// Startup
+    /// ─────────────────────────────────────────────────────────────────────────
+    async fn start(self: Arc<Self>, listen_addr: SocketAddr, client_addr: SocketAddr) -> Result<()> {
+        // Node-to-node RPC listener
+        let server = TcpListener::bind(listen_addr).await?;
+        info!("Node {} RPC listening on {}", self.id, listen_addr);
 
-
-    async fn start(self: Arc<Self>, listen_addr: SocketAddr) -> anyhow::Result<()> {
-        // Start listener with retry
-        let listener = loop {
-            match TcpListener::bind(listen_addr).await {
-                Ok(l) => {
-                    info!("Node {} listening on {}", self.id, listen_addr);
-                    break l;
-                }
-                Err(e) => {
-                    error!("Failed to bind to {}: {}. Retrying in 5 seconds...", listen_addr, e);
-                    sleep(Duration::from_secs(5)).await;
-                }
-            }
-        };
-
-        // ✅ Start stdin input loop (moved here so it actually runs)
+        // Accept loop for node-to-node
         {
-            let input_node = self.clone();
+            let me = self.clone();
             tokio::spawn(async move {
-                use tokio::io::{self, AsyncBufReadExt};
-                let mut lines = io::BufReader::new(io::stdin()).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if matches!(*input_node.state.read().await, RaftState::Leader) {
-                        // Build new log entry
-                        let mut log = input_node.log.write().await;
-                        let term = *input_node.current_term.read().await;
-                        let index = (log.len() as u64) + 1;
-                        log.push(LogEntry { term, index, command: line.clone() });
-                        drop(log);
-
-                        info!("Node {}: appended new entry {}", input_node.id, line);
-
-                        // (Optional) Send immediately to peers instead of waiting for heartbeat
-                        let term = *input_node.current_term.read().await;
-                        let commit_index = *input_node.commit_index.read().await;
-                        let log = input_node.log.read().await;
-
-                        for (&peer_id, _) in input_node.peers.iter() {
-                            let next_index = {
-                                let next_indices = input_node.next_index.read().await;
-                                next_indices.get(&peer_id).copied().unwrap_or(1)
-                            };
-                            let (prev_log_index, prev_log_term) = NetNode::prev_ptr(next_index, &log);
-                            let start_idx = next_index.saturating_sub(1);
-                            let start_usize = usize::try_from(start_idx).unwrap_or(0);
-                            let entries = if start_usize > log.len() {
-                                Vec::new()
-                            } else {
-                                log[start_usize..].to_vec()
-                            };
-
-                            let msg = RaftMessage::AppendEntries {
-                                term,
-                                leader_id: input_node.id,
-                                prev_log_index,
-                                prev_log_term,
-                                entries,
-                                leader_commit: commit_index,
-                            };
-                            input_node.send_message(peer_id, msg).await;
-                        }
-                    } else {
-                        info!(
-                            "Node {}: not leader; ignoring local command '{}'",
-                            input_node.id, line
-                        );
-                    }
-                }
-            });
-        }
-
-        // Spawn accept loop with error handling
-        let node = self.clone();
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, addr)) => {
-                        info!("Node {} accepted connection from {}", node.id, addr);
-                        let n = node.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = n.handle_inbound(stream).await {
-                                error!("Inbound handler error from {}: {}", addr, e);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        error!("Accept error: {}. Continuing...", e);
-                        sleep(Duration::from_secs(1)).await;
-                    }
-                }
-            }
-        });
-
-        // Connect to peers (outbound) with exponential backoff
-        for (&peer_id, &addr) in self.peers.iter() {
-            let node = self.clone();
-            tokio::spawn(async move {
-                let mut backoff = Duration::from_secs(1);
-                const MAX_BACKOFF: Duration = Duration::from_secs(30);
-
                 loop {
-                    info!(
-                        "Node {} attempting to connect to peer {} at {}",
-                        node.id, peer_id, addr
-                    );
-                    match TcpStream::connect(addr).await {
-                        Ok(stream) => {
-                            info!(
-                                "Node {} connected to peer {} at {}",
-                                node.id, peer_id, addr
-                            );
-                            backoff = Duration::from_secs(1);
-                            if let Err(e) = node.handle_outbound(peer_id, stream).await {
-                                error!(
-                                    "Outbound connection {} -> {} failed: {}",
-                                    node.id, peer_id, e
-                                );
-                            }
+                    match server.accept().await {
+                        Ok((stream, addr)) => {
+                            let me2 = me.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = me2.handle_inbound(stream, addr).await {
+                                    error!("[{}] inbound error: {}", me2.id, e);
+                                }
+                            });
                         }
                         Err(e) => {
-                            error!(
-                                "Connect to peer {} at {} failed: {}. Retrying in {:?}...",
-                                peer_id, addr, e, backoff
-                            );
-                            sleep(backoff).await;
-                            backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
+                            error!("[{}] accept error: {}", me.id, e);
+                            sleep(Duration::from_millis(200)).await;
                         }
                     }
                 }
             });
         }
 
-        // Periodically check for missing outbound connections
-        let reconnect_node = self.clone();
-        tokio::spawn(async move {
-            loop {
-                sleep(Duration::from_secs(5)).await; // every 5 seconds
-                let current_outbound = reconnect_node.outbound.lock().await;
-                let connected: Vec<u32> = current_outbound.keys().cloned().collect();
-                drop(current_outbound);
+        // Outbound connectors (retry)
+        {
+            let me = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    for (&peer_id, &peer_sa) in me.peers.iter() {
+                        if peer_id == me.id { continue; }
+                        let already = me.outbound.lock().await.contains_key(&peer_id);
+                        if already { continue; }
 
-                for (&peer_id, &addr) in reconnect_node.peers.iter() {
-                    if connected.contains(&peer_id) {
-                        continue;
-                    }
-
-                    info!("Node {} detected missing connection to {}, retrying...", reconnect_node.id, peer_id);
-                    let node_clone = reconnect_node.clone();
-                    tokio::spawn(async move {
-                        if let Ok(stream) = TcpStream::connect(addr).await {
-                            info!("Node {} reconnected to {}", node_clone.id, peer_id);
-                            if let Err(e) = node_clone.handle_outbound(peer_id, stream).await {
-                                error!("Reconnection to {} failed: {}", peer_id, e);
+                        match TcpStream::connect(peer_sa).await {
+                            Ok(stream) => {
+                                info!("[{}] connected to peer {} @ {}", me.id, peer_id, peer_sa);
+                                let me2 = me.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = me2.handle_outbound(peer_id, stream).await {
+                                        error!("[{}] outbound {} error: {}", me2.id, peer_id, e);
+                                    }
+                                });
                             }
+                            Err(_) => {}
                         }
-                    });
+                    }
+                    sleep(Duration::from_secs(1)).await;
                 }
-            }
-        });
+            });
+        }
 
+        // Election loop (only when armed)
+        {
+            let me = self.clone();
+            tokio::spawn(async move {
+                me.election_loop().await;
+            });
+        }
 
-        // Start election timer and raft logic loops
-        let tnode = self.clone();
-        tokio::spawn(async move { tnode.election_loop().await });
+        // Heartbeat loop (leader only)
+        {
+            let me = self.clone();
+            tokio::spawn(async move {
+                me.heartbeat_loop().await;
+            });
+        }
 
-        // Start heartbeat loop
-        let hnode = self.clone();
-        tokio::spawn(async move { hnode.heartbeat_loop().await });
+        // Apply loop
+        {
+            let me = self.clone();
+            tokio::spawn(async move {
+                me.apply_committed_entries_loop().await;
+            });
+        }
 
-        // Apply-committer: runs on ALL nodes (leaders & followers)
-        let applier = self.clone();
-        tokio::spawn(async move {
-            loop {
-                sleep(Duration::from_millis(100)).await;
-                applier.apply_committed_entries().await;
-            }
-        });
+        // Inactivity step-down loop
+        {
+            let me = self.clone();
+            tokio::spawn(async move {
+                me.inactivity_loop().await;
+            });
+        }
 
-        // Start client API listener on a port (9000 + node id)
-        let client_node = self.clone();
-        tokio::spawn(async move {
-            let client_addr: std::net::SocketAddr = format!("127.0.0.1:{}", 9000 + client_node.id)
-                .parse()
-                .expect("parse client addr");
-            if let Err(e) = client_node.run_client_api(client_addr).await {
-                error!("client API failed: {:?}", e);
-            }
-        });
+        // Client API server
+        {
+            let my_id = self.id;
+            let me = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = me.clone().run_client_api(client_addr).await {
+                    debug!("[{}] client API ended: {}", my_id, e);
+                }
+            });
+        }
 
         Ok(())
     }
 
-    async fn handle_inbound(&self, stream: TcpStream) -> anyhow::Result<()> {
-        let mut framed = FramedRead::new(stream, LengthDelimitedCodec::new());
-        while let Some(frame_res) = framed.next().await {
-            let frame = frame_res?; // BytesMut
-            let vec = frame.to_vec();
-            if let Ok(msg) = serde_json::from_slice::<RaftMessage>(&vec) {
-                self.handle_message(msg).await;
+    /// ─────────────────────────────────────────────────────────────────────────
+    /// Node-to-node RPC plumbing
+    /// ─────────────────────────────────────────────────────────────────────────
+    async fn handle_inbound(&self, stream: TcpStream, _addr: SocketAddr) -> Result<()> {
+        let (r, _w) = stream.into_split();
+        let mut reader = FramedRead::new(r, LengthDelimitedCodec::new());
+        while let Some(Ok(bytes)) = reader.next().await {
+            match serde_json::from_slice::<RaftMessage>(&bytes) {
+                Ok(msg) => self.handle_message(msg).await,
+                Err(e) => error!("[{}] decode inbound error: {}", self.id, e),
             }
         }
         Ok(())
     }
 
-    async fn handle_outbound(&self, peer_id: u32, stream: TcpStream) -> anyhow::Result<()> {
-    let (_r, w) = stream.into_split();
-        let mut writer = FramedWrite::new(w, LengthDelimitedCodec::new());
+    async fn handle_outbound(&self, peer_id: u32, stream: TcpStream) -> Result<()> {
+        let (r, w) = stream.into_split();
+        let mut reader = FramedRead::new(r, LengthDelimitedCodec::new());
+        let writer = FramedWrite::new(w, LengthDelimitedCodec::new());
+
+        // register sender channel
         let (tx, mut rx) = mpsc::unbounded_channel::<RaftMessage>();
-        // register sender
-        {
-            let mut out = self.outbound.lock().await;
-            out.insert(peer_id, tx.clone());
-        }
+        self.outbound.lock().await.insert(peer_id, tx);
 
-        let result = async {
+        // forward loop
+        let my_id = self.id;
+        let mut writer_owned = writer;
+        tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                let payload = serde_json::to_vec(&msg)?;
-                if let Err(e) = writer.send(Bytes::from(payload)).await {
-                    // propagate so we can clean up and reconnect
-                    return Err::<(), anyhow::Error>(e.into());
+                match serde_json::to_vec(&msg) {
+                    Ok(buf) => {
+                        if let Err(e) = writer_owned.send(Bytes::from(buf)).await {
+                            error!("[{}] forward->peer {} send error: {}", my_id, peer_id, e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("[{}] forward->peer {} serialize error: {}", my_id, peer_id, e);
+                        break;
+                    }
                 }
             }
-            Ok(())
-        }.await;
+        });
 
-        // ensure we drop the sender for this peer on any exit path
-        {
-            let mut out = self.outbound.lock().await;
-            out.remove(&peer_id);
+        // read loop
+        while let Some(Ok(bytes)) = reader.next().await {
+            match serde_json::from_slice::<RaftMessage>(&bytes) {
+                Ok(msg) => self.handle_message(msg).await,
+                Err(e) => error!("[{}] decode inbound-from-{} error: {}", self.id, peer_id, e),
+            }
         }
 
-        result
+        self.outbound.lock().await.remove(&peer_id);
+        Ok(())
     }
 
     async fn send_message(&self, target: u32, msg: RaftMessage) {
-        let out = self.outbound.lock().await;
-        if let Some(tx) = out.get(&target) {
+        if let Some(tx) = self.outbound.lock().await.get(&target).cloned() {
             let _ = tx.send(msg);
-        } else {
-            // no connection yet
-            debug!("Node {}: no outbound for {}", self.id, target);
         }
     }
 
+    /// ─────────────────────────────────────────────────────────────────────────
+    /// Raft handlers
+    /// ─────────────────────────────────────────────────────────────────────────
     async fn handle_message(&self, message: RaftMessage) {
         match message {
             RaftMessage::RequestVote { term, candidate_id, last_log_index, last_log_term } => {
-                info!("Node {} received vote request from {} for term {}", self.id, candidate_id, term);
-                
-                let log = self.log.read().await;
-                let our_last_index = log.len() as u64;
-                let our_last_term = log.last().map_or(0, |entry| entry.term);
-                
-                // Check if candidate's log is at least as up-to-date as ours
+                let mut vote_granted = false;
+
+                // Candidate's log up-to-dateness
+                let (our_last_index, our_last_term) = {
+                    let log = self.log.read().await;
+                    (log.len() as u64, log.last().map_or(0, |e| e.term))
+                };
                 let log_is_ok = match our_last_term.cmp(&last_log_term) {
                     std::cmp::Ordering::Less => true,
-                    std::cmp::Ordering::Equal => last_log_index >= our_last_index,
                     std::cmp::Ordering::Greater => false,
+                    std::cmp::Ordering::Equal => our_last_index <= last_log_index,
                 };
-                
-                if !log_is_ok {
-                    info!("Node {} rejecting vote for {} (log out of date)", self.id, candidate_id);
-                    let reply = RaftMessage::VoteReply {
-                        term: *self.current_term.read().await,
-                        vote_granted: false,
-                        sender_id: self.id
-                    };
-                    self.send_message(candidate_id, reply).await;
-                    return;
-                }
-                
-                // Handle vote request
-                let mut current_term = self.current_term.write().await;
-                let mut voted_for = self.voted_for.write().await;
-                if term > *current_term {
-                    *current_term = term;
-                    *voted_for = None;
-                    *self.state.write().await = RaftState::Follower;
-                }
-                let grant = if term == *current_term {
-                    match *voted_for {
-                        None => {
-                            *voted_for = Some(candidate_id);
-                            *self.last_heartbeat.write().await = Instant::now();
-                            true
-                        }
-                        Some(id) => id == candidate_id,
-                    }
-                } else { false };
 
-                let reply = RaftMessage::VoteReply { term: *current_term, vote_granted: grant, sender_id: self.id };
+                let ct = *self.current_term.read().await;
+                if term < ct {
+                    vote_granted = false;
+                } else {
+                    if term > ct {
+                        *self.current_term.write().await = term;
+                        *self.voted_for.write().await = None;
+                        *self.state.write().await = RaftState::Follower;
+                    }
+                    let voted_for = *self.voted_for.read().await;
+                    if (voted_for.is_none() || voted_for == Some(candidate_id)) && log_is_ok {
+                        *self.voted_for.write().await = Some(candidate_id);
+                        vote_granted = true;
+                    }
+                }
+
+                let reply = RaftMessage::VoteReply {
+                    term: *self.current_term.read().await,
+                    vote_granted,
+                    sender_id: self.id,
+                };
                 self.send_message(candidate_id, reply).await;
             }
+
             RaftMessage::VoteReply { term, vote_granted, sender_id } => {
-                info!("Node {} received vote reply from {} (granted: {})", self.id, sender_id, vote_granted);
                 self.handle_vote_reply(term, vote_granted, sender_id).await;
             }
-            RaftMessage::AppendEntries { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit } => {
-                info!("Node {} received AppendEntries from {} (term {}, {} entries)", 
-                     self.id, leader_id, term, entries.len());
 
-                {
-                    let mut hint = self.leader_hint.write().await;
-                    *hint = Some(leader_id);
-                }
-                
-                let current_term = *self.current_term.read().await;
+            RaftMessage::AppendEntries { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit } => {
                 let mut success = false;
-                
-                // Reply false if term < currentTerm
-                if term < current_term {
-                    info!("Node {} rejecting AppendEntries (term {} < {})", self.id, term, current_term);
+                let ct = *self.current_term.read().await;
+
+                if term < ct {
+                    success = false;
                 } else {
-                    // Update term if needed
-                    if term > current_term {
+                    if term > ct {
                         *self.current_term.write().await = term;
-                        *self.state.write().await = RaftState::Follower;
                         *self.voted_for.write().await = None;
                     }
-                    
-                    // Reset heartbeat timer
+                    *self.state.write().await = RaftState::Follower;
                     *self.last_heartbeat.write().await = Instant::now();
-                    
+                    *self.leader_hint.write().await = Some(leader_id);
+
+                    // Log consistency
                     let mut log = self.log.write().await;
-                    
-                    // Check log consistency
                     let log_ok = if prev_log_index == 0 {
                         true
-                    } else if prev_log_index > log.len() as u64 {
+                    } else if (prev_log_index as usize) <= log.len() {
+                        log.get((prev_log_index - 1) as usize).map_or(false, |e| e.term == prev_log_term)
+                    } else {
                         false
-                    } else {
-                        log.get(prev_log_index as usize - 1)
-                           .map_or(false, |e| e.term == prev_log_term)
                     };
-                    
-                    if !log_ok {
-                        info!("Node {} log inconsistency at index {}", self.id, prev_log_index);
-                    } else {
-                        // Truncate conflicting entries and append new ones
+
+                    if log_ok {
                         if prev_log_index < log.len() as u64 {
                             log.truncate(prev_log_index as usize);
                         }
                         log.extend_from_slice(&entries);
-                        
-                        // Update commit index
+
                         let mut commit_index = self.commit_index.write().await;
                         if leader_commit > *commit_index {
                             *commit_index = leader_commit.min(log.len() as u64);
-                            info!("Node {} updated commit_index to {}", self.id, *commit_index);
                         }
-                                                // Apply any newly committed entries on this follower as well
-                        drop(commit_index); // release lock before await
-                        drop(log);          // release lock before await
-                        self.apply_committed_entries().await;
                         success = true;
                     }
                 }
-                
-                // Send reply
+
                 let reply = RaftMessage::AppendReply {
                     term: *self.current_term.read().await,
                     sender_id: self.id,
@@ -580,39 +445,14 @@ impl NetNode {
                 };
                 self.send_message(leader_id, reply).await;
             }
-            RaftMessage::AppendReply { term, sender_id, success } => {
-                info!("Node {} received AppendReply from {} (success: {})", self.id, sender_id, success);
-                
-                let current_term = *self.current_term.read().await;
-                if term > current_term {
-                    *self.current_term.write().await = term;
-                    *self.state.write().await = RaftState::Follower;
-                    *self.voted_for.write().await = None;
-                    return;
-                }
-                
-                if matches!(*self.state.read().await, RaftState::Leader) {
-                    if success {
-                        let last_log_index = self.log.read().await.len() as u64;
-                        self.update_indices(sender_id, last_log_index).await;
-                        info!("Node {} updated indices for {} to {}", self.id, sender_id, last_log_index);
-                    } else {
-                        let mut next_indices = self.next_index.write().await;
-                        if let Some(next_idx) = next_indices.get_mut(&sender_id) {
-                            *next_idx = Self::clamp1(next_idx.saturating_sub(1)); // clamp to ≥1
-                            info!("Node {} decreased next_index for {} to {}", self.id, sender_id, *next_idx);
-                        }
-                    }
-                }
+
+            RaftMessage::AppendReply { .. } => {
+                // No-op in this lightweight demo.
             }
         }
     }
 
-    // async fn handle_vote_request(&self, term: u64, candidate_id: u32) {
-
-    // }
-
-    async fn handle_vote_reply(&self, term: u64, vote_granted: bool, _sender_id: u32) {
+    async fn handle_vote_reply(&self, term: u64, vote_granted: bool, sender_id: u32) {
         let current_term = *self.current_term.read().await;
         if term > current_term {
             *self.current_term.write().await = term;
@@ -620,272 +460,174 @@ impl NetNode {
             *self.state.write().await = RaftState::Follower;
             return;
         }
-        if matches!(*self.state.read().await, RaftState::Candidate) && term == current_term {
-            let mut votes = self.votes_received.write().await;
-            let entry = votes.entry(term).or_insert_with(HashMap::new);
-            entry.insert(_sender_id, vote_granted);
-            // count granted votes
-            let granted_votes = entry.values().filter(|&&v| v).count();
-            let total = self.peers.len() + 1;
-            info!("Node {}: term {} has {} granted votes out of {}", self.id, term, granted_votes, total);
-        if granted_votes > total / 2 && matches!(*self.state.read().await, RaftState::Candidate) {
+
+        if !matches!(*self.state.read().await, RaftState::Candidate) || term != current_term {
+            return;
+        }
+
+        let mut votes = self.votes_received.write().await;
+        let entry = votes.entry(term).or_insert_with(HashMap::new);
+        entry.insert(sender_id, vote_granted);
+        let granted = entry.values().filter(|&&v| v).count();
+        let total = self.peers.len() + 1;
+
+        if granted * 2 > total {
             *self.state.write().await = RaftState::Leader;
-            info!("Node {} became leader for term {}", self.id, current_term);
+            *self.leader_hint.write().await = Some(self.id);
 
-            self.rebuild_state_from_log().await;
-
-            // Properly initialize replication state (Raft §5.2)
-            let last_index = self.log.read().await.len() as u64;
+            // Reset replication pointers
+            let log_len = self.log.read().await.len() as u64;
             {
-                let mut next_indices = self.next_index.write().await;
-                let mut match_indices = self.match_index.write().await;
-                for (&peer_id, _) in self.peers.iter() {
-                    next_indices.insert(peer_id, last_index + 1); // 1-based, points to "next to send"
-                    match_indices.insert(peer_id, 0);
+                let mut next_i = self.next_index.write().await;
+                let mut match_i = self.match_index.write().await;
+                for (&pid, _) in self.peers.iter() {
+                    next_i.insert(pid, log_len + 1);
+                    match_i.insert(pid, 0);
                 }
             }
 
-            // send initial heartbeat
-            for (&peer_id, _) in self.peers.iter() {
+            // Kick initial heartbeats
+            let term_now = *self.current_term.read().await;
+            for (&pid, _) in self.peers.iter() {
                 let hb = RaftMessage::AppendEntries {
-                    term: current_term,
+                    term: term_now,
                     leader_id: self.id,
                     prev_log_index: 0,
                     prev_log_term: 0,
                     entries: vec![],
-                    leader_commit: 0
+                    leader_commit: *self.commit_index.read().await,
                 };
-                self.send_message(peer_id, hb).await;
+                self.send_message(pid, hb).await;
             }
         }
+    }
+
+    /// ─────────────────────────────────────────────────────────────────────────
+    /// Raft loops (quiescent mode)
+    /// ─────────────────────────────────────────────────────────────────────────
+    async fn begin_election(&self) {
+        *self.state.write().await = RaftState::Candidate;
+        *self.current_term.write().await += 1;
+        let term = *self.current_term.read().await;
+        *self.voted_for.write().await = Some(self.id);
+        *self.last_heartbeat.write().await = Instant::now();
+
+        {
+            let mut votes = self.votes_received.write().await;
+            votes.insert(term, HashMap::new());
+            if let Some(map) = votes.get_mut(&term) {
+                map.insert(self.id, true);
+            }
+        }
+
+        let (last_log_index, last_log_term) = {
+            let log = self.log.read().await;
+            (log.len() as u64, log.last().map_or(0, |e| e.term))
+        };
+
+        info!("[{}] starting on-demand election for term {}", self.id, term);
+        for (&pid, _) in self.peers.iter() {
+            let req = RaftMessage::RequestVote {
+                term,
+                candidate_id: self.id,
+                last_log_index,
+                last_log_term,
+            };
+            self.send_message(pid, req).await;
+        }
+    }
+
+    async fn trigger_election_now_if_needed(&self) {
+    {
+        let mut armed = self.election_armed.write().await;
+        if !*armed {
+            *armed = true;
+            debug!("[{}] elections armed by client activity", self.id);
+        }
+    }
+
+    if !matches!(*self.state.read().await, RaftState::Leader) && self.leader_hint.read().await.is_none() {
+        // small randomized delay (50–250 ms) so different nodes sometimes win
+        let jitter = 50 + (rand::random::<u64>() % 200);
+        sleep(Duration::from_millis(jitter)).await;
+
+        // still no leader? start election
+        if !matches!(*self.state.read().await, RaftState::Leader) && self.leader_hint.read().await.is_none() {
+            self.begin_election().await;
+        }
+    }
+}
+
+
+    async fn record_client_activity(&self) {
+        *self.last_client_activity.write().await = Instant::now();
+    }
+
+    async fn inactivity_loop(&self) {
+        loop {
+            sleep(Duration::from_millis(250)).await;
+            if matches!(*self.state.read().await, RaftState::Leader) {
+                let last = *self.last_client_activity.read().await;
+                if last.elapsed() >= self.inactivity_timeout {
+                    info!("[{}] idle for {:?}; stepping down", self.id, self.inactivity_timeout);
+                    *self.state.write().await = RaftState::Follower;
+                    *self.leader_hint.write().await = None;
+                    *self.voted_for.write().await = None;
+                    self.votes_received.write().await.clear();
+                    *self.election_armed.write().await = false; // disarm
+                    *self.last_heartbeat.write().await = Instant::now();
+                }
+            }
         }
     }
 
     async fn election_loop(&self) {
         loop {
-        // 2–4s timeout
-        let timeout = Duration::from_millis(2000 + rand::random::<u64>() % 2000);
-
-        match *self.state.read().await {
-            RaftState::Leader => {
-                sleep(Duration::from_millis(500)).await;
+            if !*self.election_armed.read().await {
+                sleep(Duration::from_millis(80)).await;
                 continue;
             }
-            RaftState::Candidate | RaftState::Follower => {
-                let last = *self.last_heartbeat.read().await;
-                if last.elapsed() < timeout {
-                    sleep(Duration::from_millis(100)).await;
+
+            let timeout = Duration::from_millis(1750 + (random::<u64>() % 1250));
+
+            match *self.state.read().await {
+                RaftState::Leader => {
+                    sleep(Duration::from_millis(200)).await;
                     continue;
                 }
-                info!(
-                    "Node {} election timeout after {:?}, starting election",
-                    self.id, last.elapsed()
-                );
-            }
-        }
-
-        if self.failure_simulated().await {
-            continue;
-        }
-
-        *self.state.write().await = RaftState::Candidate;
-        *self.current_term.write().await += 1;
-        *self.voted_for.write().await = Some(self.id);
-        *self.last_heartbeat.write().await = Instant::now();
-        let term = *self.current_term.read().await;
-        info!("Node {} starting election for term {}", self.id, term);
-
-        // reset & self vote
-        {
-            let mut votes = self.votes_received.write().await;
-            votes.insert(term, HashMap::new());
-            votes.get_mut(&term).unwrap().insert(self.id, true);
-        }
-
-        let (last_log_index, last_log_term) = {
-            let lg = self.log.read().await;
-            let idx = lg.len() as u64;
-            let term_of_last = lg.last().map_or(0, |e| e.term);
-            (idx, term_of_last)
-        };
-
-        let req = RaftMessage::RequestVote {
-            term,
-            candidate_id: self.id,
-            last_log_index,
-            last_log_term,
-        };
-
-        for (&peer_id, _) in self.peers.iter() {
-            self.send_message(peer_id, req.clone()).await;
-        }
-    }
-}
-
-    async fn failure_simulated(&self) -> bool {
-        false
-    }
-
-    // 🔁 Rebuilds the in-memory state machine (e.g., registered_users) from the committed log
-    async fn rebuild_state_from_log(&self) {
-        let log = self.log.read().await;
-        let commit_index = *self.commit_index.read().await;
-
-        info!("Node {} rebuilding state from {} committed entries", self.id, commit_index);
-
-        self.registered_users.write().await.clear();
-
-        for i in 0..commit_index {
-            if let Some(entry) = log.get(i as usize) {
-                let mut parts = entry.command.split_whitespace();
-                match parts.next() {
-                    Some("REGISTER") => {
-                        if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
-                            self.registered_users
-                                .write().await
-                                .insert(user.to_string(), ip.to_string());
-                        }
-                    }
-                    Some("UNREGISTER") => {
-                        if let Some(user) = parts.next() {
-                            self.registered_users.write().await.remove(user);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        info!("Node {} rebuild complete: {} users restored",
-            self.id, self.registered_users.read().await.len());
-    }
-
-    // Apply committed log entries to state machine
-        // Apply committed log entries to state machine
-    async fn apply_committed_entries(&self) {
-        let commit_index = *self.commit_index.read().await;
-        let mut last_applied = self.last_applied.write().await;
-
-        if commit_index > *last_applied {
-            let log = self.log.read().await;
-            for i in (*last_applied + 1)..=commit_index {
-                if let Some(entry) = log.get(i as usize - 1) {
-                    if !matches!(*self.state.read().await, RaftState::Leader) {
-                        info!("Node {} (follower) skipping execution of {}", self.id, entry.command);
+                RaftState::Candidate | RaftState::Follower => {
+                    let last = *self.last_heartbeat.read().await;
+                    if last.elapsed() < timeout {
+                        sleep(Duration::from_millis(100)).await;
                         continue;
                     }
-                    let mut parts = entry.command.split_whitespace();
-                    match parts.next() {
-                        Some("REGISTER") => {
-                            if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
-                                self.registered_users
-                                    .write().await
-                                    .insert(user.to_string(), ip.to_string());
-                                info!("Node {}: Applied REGISTER {} {}", self.id, user, ip);
-                            } else {
-                                info!("Node {}: Malformed REGISTER command '{}'", self.id, entry.command);
-                            }
-                        }
-                        Some("UNREGISTER") => {
-                            if let Some(user) = parts.next() {
-                                self.registered_users
-                                    .write().await
-                                    .remove(user);
-                                info!("Node {}: Applied UNREGISTER {}", self.id, user);
-                            } else {
-                                info!("Node {}: Malformed UNREGISTER command '{}'", self.id, entry.command);
-                            }
-                        }
-                        Some("ENCRYPT_IMAGE") => {
-                        // ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
-                        if let (Some(_id), Some(passphrase), Some(input_path), Some(output_path)) =
-                            (parts.next(), parts.next(), parts.next(), parts.next())
-                        {
-                        match tokio::fs::read(&input_path).await {
-                            Ok(plaintext_bytes) => {
-                                // <- your always-on cover file
-                                let cover_path = "images/cover_image.PNG";
-                                match tokio::fs::read(cover_path).await {
-                                    Ok(cover_bytes) => {
-                                        match encrypt_and_embed_to_png(
-                                            passphrase.as_bytes(),
-                                            &plaintext_bytes,   // plaintext = the user's image
-                                            &cover_bytes,       // cover     = the constant cover image
-                                        ) {
-                                            Ok((stego_bytes, sha, count)) => {
-                                                if let Some(parent) = Path::new(&output_path).parent() {
-                                                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                                                        error!("Node {}: create_dir_all {:?} failed: {:?}", self.id, parent, e);
-                                                        continue;
-                                                    }
-                                                }
-                                                if let Err(e) = tokio::fs::write(&output_path, &stego_bytes).await {
-                                                    error!("Node {}: failed to save stego image {}: {:?}", self.id, output_path, e);
-                                                } else {
-                                                    info!(
-                                                        "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
-                                                        self.id, input_path, output_path, count, sha
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => error!("Node {}: encryption/embed failed: {:?}", self.id, e),
-                                        }
-                                    }
-                                    Err(e) => error!("Node {}: failed to read cover image {}: {:?}", self.id, cover_path, e),
-                                }
-                            }
-                            Err(e) => error!("Node {}: failed to read {}: {:?}", self.id, input_path, e),
-                        }
-                        } else {
-                            error!("Node {}: malformed ENCRYPT_IMAGE command '{}'", self.id, entry.command);
-                        }
-                    }
-                        Some(other) => {
-                            info!("Node {}: Unknown command '{}'", self.id, other);
-                        }
-                        None => {}
-                    }
                 }
             }
-            *last_applied = commit_index;
+
+            self.begin_election().await;
         }
     }
 
     async fn heartbeat_loop(&self) {
         loop {
-            // Heartbeat interval should be significantly less than election timeout but not too aggressive
-            sleep(Duration::from_millis(500)).await;
-            
-            // Only leaders send heartbeats
+            sleep(Duration::from_millis(400)).await;
             if !matches!(*self.state.read().await, RaftState::Leader) {
                 continue;
             }
+
             let term = *self.current_term.read().await;
             let commit_index = *self.commit_index.read().await;
             let log = self.log.read().await;
-            
-            // Apply any newly committed entries
-            self.apply_committed_entries().await;
-            
-            for (&peer_id, _) in self.peers.iter() {
+
+            for (&pid, _) in self.peers.iter() {
                 let next_index = {
-                    let next_indices = self.next_index.read().await;
-                    next_indices.get(&peer_id).copied().unwrap_or(1)
+                    let map = self.next_index.read().await;
+                    map.get(&pid).copied().unwrap_or(1)
                 };
-                
-                // Prepare entries to send
                 let (prev_log_index, prev_log_term) = Self::prev_ptr(next_index, &log);
-                
-                // Get entries starting from next_index (avoid underflow)
-                let start_idx = next_index.saturating_sub(1);            // u64
-                let start_usize = usize::try_from(start_idx).unwrap_or(0);
-                let entries: Vec<LogEntry> = if next_index == 0 || start_usize > log.len() {
-                    Vec::new()
-                } else {
-                    log[start_usize..].to_vec()
-                };
-                
-                // Send AppendEntries RPC
+                let start_idx = next_index.saturating_sub(1) as usize;
+                let entries: Vec<LogEntry> = if start_idx > log.len() { vec![] } else { log[start_idx..].to_vec() };
+
                 let msg = RaftMessage::AppendEntries {
                     term,
                     leader_id: self.id,
@@ -894,325 +636,282 @@ impl NetNode {
                     entries,
                     leader_commit: commit_index,
                 };
-                self.send_message(peer_id, msg).await;
+                self.send_message(pid, msg).await;
             }
         }
     }
-    
-    
-    async fn update_indices(&self, peer_id: u32, acked_index: u64) {
-        // 1️⃣ Update follower’s replication state
-        {
-            let mut next_indices = self.next_index.write().await;
-            let mut match_indices = self.match_index.write().await;
-            match_indices.insert(peer_id, acked_index);
-            next_indices.insert(peer_id, acked_index + 1);
-        }
 
-        // 2️⃣ Compute possible majority commit index
-        let mut all_matches: Vec<u64> = {
-            let m = self.match_index.read().await;
-            m.values().copied().collect()
-        };
-        let leader_last = self.log.read().await.len() as u64;
-        all_matches.push(leader_last); // include leader
-        all_matches.sort_unstable();
-
-        let majority_idx = all_matches[all_matches.len() / 2];
-        if majority_idx == 0 {
-            return;
-        }
-
-        // 3️⃣ Commit only entries from current term (Raft §5.4.2)
-        let entry_term = {
-            let log = self.log.read().await;
-            log.get((majority_idx - 1) as usize).map(|e| e.term)
-        };
-
-        if let Some(t) = entry_term {
-            let current_term = *self.current_term.read().await;
-            if t == current_term {
-                let mut commit_index = self.commit_index.write().await;
-                if majority_idx > *commit_index {
-                    *commit_index = majority_idx;
-                    println!("🟢 Node {} advanced commit_index to {}", self.id, majority_idx);
+    async fn apply_committed_entries_loop(&self) {
+        loop {
+            {
+                let mut last_applied = self.last_applied.write().await;
+                let commit_index = *self.commit_index.read().await;
+                while *last_applied < commit_index {
+                    *last_applied += 1;
+                    let idx = *last_applied as usize - 1;
+                    let entry = self.log.read().await.get(idx).cloned();
+                    if let Some(e) = entry {
+                        self.apply(e).await;
+                    }
                 }
             }
+            sleep(Duration::from_millis(80)).await;
         }
     }
 
-    // Client API: a simple TCP line protocol for issuing commands
-    // ================================================================
-    pub async fn run_client_api(self: Arc<Self>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    async fn apply(&self, entry: LogEntry) {
+        let parts: Vec<_> = entry.command.split_whitespace().collect();
+        if parts.is_empty() { return; }
+
+        match parts[0] {
+            "SET" if parts.len() >= 3 => {
+                let k = parts[1].to_string();
+                let v = parts[2..].join(" ");
+                self.kv.write().await.insert(k, v);
+            }
+            "REGISTER" if parts.len() == 3 => {
+                let user = parts[1].to_string();
+                let ip   = parts[2].to_string();
+                self.registered_users.write().await.insert(user, ip);
+            }
+            "UNREGISTER" if parts.len() == 2 => {
+                let user = parts[1];
+                self.registered_users.write().await.remove(user);
+            }
+            _ => { /* ignore unknown */ }
+        }
+    }
+
+    /// ─────────────────────────────────────────────────────────────────────────
+    /// Client API (GUI/Proxy)
+    /// ─────────────────────────────────────────────────────────────────────────
+    async fn run_client_api(self: Arc<Self>, addr: SocketAddr) -> Result<()> {
         let listener = TcpListener::bind(addr).await?;
-        info!("🌐 Node {} client API listening on {}", self.id, addr);
+        info!("Node {} client API listening on {}", self.id, addr);
 
         loop {
-            let (stream, peer_addr) = listener.accept().await?;
-            info!("📡 Node {} accepted client connection from {}", self.id, peer_addr);
-            let node = self.clone();
+            let (stream, _addr) = listener.accept().await?;
+            let my_id = self.id;
+            let me = self.clone();
             tokio::spawn(async move {
-                if let Err(e) = node.handle_client_connection(stream).await {
-                    error!("client connection error: {:?}", e);
+                if let Err(e) = me.clone().handle_client_conn(stream).await {
+                    debug!("[{}] client conn ended: {}", my_id, e);
                 }
             });
         }
     }
 
-    async fn handle_client_connection(&self, mut stream: TcpStream) -> anyhow::Result<()> {
-        let (r, mut w) = stream.split();
-        let mut reader = BufReader::new(r);
-        let mut line = String::new();
+    async fn handle_client_conn(self: Arc<Self>, stream: TcpStream) -> anyhow::Result<()> {
+        use std::io::ErrorKind;
+        use tokio::time::timeout;
 
-        w.write_all(b"Welcome to Cloud P2P Node API!\n").await?;
-        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST | SHOW_USERS | SUBMIT <op_id> <command...> | ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
+        let (mut r, mut w) = stream.into_split();
+        let mut buf = Vec::with_capacity(512);
 
         loop {
-            line.clear();
-            let n = reader.read_line(&mut line).await?;
-            if n == 0 {
-                break;
-            }
-            let cmd = line.trim();
-            let is_leader = matches!(*self.state.read().await, RaftState::Leader);
-            let mut parts = cmd.split_whitespace();
+            buf.clear();
 
+            let mut tmp = [0u8; 512];
+            for _ in 0..8 {
+                match timeout(Duration::from_millis(200), r.read(&mut tmp)).await {
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(n)) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.contains(&b'\n') { break; }
+                    }
+                    Ok(Err(e)) => {
+                        if matches!(e.kind(),
+                            ErrorKind::ConnectionReset
+                            | ErrorKind::ConnectionAborted
+                            | ErrorKind::BrokenPipe
+                            | ErrorKind::UnexpectedEof
+                        ) {
+                            return Ok(());
+                        }
+                        return Err(e.into());
+                    }
+                    Err(_elapsed) => {
+                        if !buf.is_empty() { break; }
+                    }
+                }
+            }
+
+            if buf.is_empty() {
+                return Ok(());
+            }
+
+            let line = if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                &buf[..pos]
+            } else {
+                &buf[..]
+            };
+            let cmd = String::from_utf8_lossy(line).trim().to_string();
+            if cmd.is_empty() {
+                Self::write_quiet(&mut w, b"ERR empty\n").await?;
+                continue;
+            }
+
+            // Client activity → arm elections / possibly trigger immediately
+            self.record_client_activity().await;
+            if !matches!(*self.state.read().await, RaftState::Leader) {
+                self.trigger_election_now_if_needed().await;
+            }
+
+            // Parse commands (supports SUBMIT <op_id> <INNER...>)
+            let mut parts = cmd.split_whitespace();
             match parts.next() {
                 Some("LEADER") => {
-                    if is_leader {
-                        w.write_all(format!("LEADER {}\n", self.id).as_bytes()).await?;
+                    if matches!(*self.state.read().await, RaftState::Leader) {
+                        Self::write_quiet(&mut w, format!("LEADER {}\n", self.id).as_bytes()).await?;
                     } else if let Some(lid) = *self.leader_hint.read().await {
-                        let addr = NetNode::client_addr_for(lid);
-                        w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                        Self::write_quiet(&mut w, format!("REDIRECT {}\n", Self::client_addr_for(lid)).as_bytes()).await?;
                     } else {
-                        w.write_all(b"NOT_LEADER\n").await?;
+                        Self::write_quiet(&mut w, b"NOT_LEADER\n").await?;
                     }
                 }
 
-                Some("REGISTER") => {
-                    if !is_leader {
-                        match self.forward_to_leader(cmd).await {
-                            Ok(reply) => {
-                                w.write_all(reply.as_bytes()).await?;
-                            }
-                            Err(_) => {
-                                // fallback to hint if we can
-                                if let Some(lid) = *self.leader_hint.read().await {
-                                    let addr = NetNode::client_addr_for(lid);
-                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
-                                } else {
-                                    w.write_all(b"NOT_LEADER\n").await?;
-                                }
-                            }
+                Some("SHOW_USERS") => {
+                    let map = self.registered_users.read().await;
+                    if map.is_empty() {
+                        Self::write_quiet(&mut w, b"<empty>\n").await?;
+                    } else {
+                        for (u, ip) in map.iter() {
+                            Self::write_quiet(&mut w, format!("{} {}\n", u, ip).as_bytes()).await?;
                         }
-                        continue;
                     }
-                    let user = match parts.next() {
-                        Some(s) => s.to_string(),
-                        None => {
-                            w.write_all(b"Usage: REGISTER <user> <ip>\n").await?;
-                            continue;
-                        }
-                    };
-                    let ip = match parts.next() {
-                        Some(s) => s.to_string(),
-                        None => {
-                            w.write_all(b"Usage: REGISTER <user> <ip>\n").await?;
-                            continue;
-                        }
-                    };
-
-                    let command = format!("REGISTER {} {}", user, ip);
-                    self.append_and_replicate(command).await;
-                    w.write_all(b"OK\n").await?;
-                }
-
-                Some("UNREGISTER") => {
-                    if !is_leader {
-                        match self.forward_to_leader(cmd).await {
-                            Ok(reply) => {
-                                w.write_all(reply.as_bytes()).await?;
-                            }
-                            Err(_) => {
-                                // fallback to hint if we can
-                                if let Some(lid) = *self.leader_hint.read().await {
-                                    let addr = NetNode::client_addr_for(lid);
-                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
-                                } else {
-                                    w.write_all(b"NOT_LEADER\n").await?;
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    let user = match parts.next() {
-                        Some(s) => s.to_string(),
-                        None => {
-                            w.write_all(b"Usage: UNREGISTER <user>\n").await?;
-                            continue;
-                        }
-                    };
-                    let command = format!("UNREGISTER {}", user);
-                    self.append_and_replicate(command).await;
-                    w.write_all(b"OK\n").await?;
                 }
 
                 Some("LIST") => {
-                    let log = self.log.read().await;
-                    if log.is_empty() {
-                        w.write_all(b"(empty)\n").await?;
-                    } else {
-                        for e in log.iter() {
-                            let s = format!("idx={} term={} cmd={}\n", e.index, e.term, e.command);
-                            w.write_all(s.as_bytes()).await?;
-                        }
-                    }
+                    let committed = *self.commit_index.read().await;
+                    Self::write_quiet(&mut w, format!("COMMITTED {}\n", committed).as_bytes()).await?;
                 }
-                
-                Some("SHOW_USERS") => {
-                    if !is_leader {
-                        // forward to the leader so you always see the leader’s authoritative state
-                        match self.forward_to_leader("SHOW_USERS").await {
-                            Ok(reply) => {
-                                w.write_all(reply.as_bytes()).await?;
-                            }
-                            Err(_) => {
-                                if let Some(lid) = *self.leader_hint.read().await {
-                                    let addr = NetNode::client_addr_for(lid);
-                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
-                                } else {
-                                    w.write_all(b"NOT_LEADER\n").await?;
-                                }
-                            }
-                        }
-                        continue;
-                    }
 
-                    // leader path (unchanged)
-                    let users = self.registered_users.read().await;
-                    if users.is_empty() {
-                        w.write_all(b"(empty)\n").await?;
-                    } else {
-                        for (u, ip) in users.iter() {
-                            w.write_all(format!("{} {}\n", u, ip).as_bytes()).await?;
-                        }
-                    }
+                Some("GET") => {
+                    let k = match parts.next() { Some(s) => s, None => { Self::write_quiet(&mut w, b"ERR usage GET <k>\n").await?; continue; } };
+                    let val = self.kv.read().await.get(k).cloned().unwrap_or_else(|| "<nil>".into());
+                    Self::write_quiet(&mut w, format!("{}\n", val).as_bytes()).await?;
                 }
+
+                // SUBMIT <op_id> <INNER...>
                 Some("SUBMIT") => {
-                // Usage: SUBMIT <op_id> <command...>
-                let op_id = match parts.next() {
-                    Some(s) => s.to_string(),
-                    None => {
-                        w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?;
+                    let op_id = match parts.next() { Some(x) => x.to_string(), None => { Self::write_quiet(&mut w, b"ERR usage SUBMIT <op_id> <cmd...>\n").await?; continue; } };
+
+                    // If we've already processed this op-id, return OK (idempotent)
+                    {
+                        let seen = self.processed_ops.read().await;
+                        if seen.contains(&op_id) {
+                            Self::write_quiet(&mut w, b"OK\n").await?;
+                            continue;
+                        }
+                    }
+
+                    // Determine inner command
+                    let inner_first = match parts.next() {
+                        Some(x) => x,
+                        None => { Self::write_quiet(&mut w, b"ERR usage SUBMIT <op_id> <cmd...>\n").await?; continue; }
+                    };
+
+                    // Leader routing
+                    if !matches!(*self.state.read().await, RaftState::Leader) {
+                        if let Some(lid) = *self.leader_hint.read().await {
+                            Self::write_quiet(&mut w, format!("REDIRECT {}\n", Self::client_addr_for(lid)).as_bytes()).await?;
+                        } else {
+                            Self::write_quiet(&mut w, b"RETRY\n").await?;
+                        }
                         continue;
                     }
-                };
-                let rest = parts.collect::<Vec<_>>().join(" ");
-                if rest.is_empty() {
-                    w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?;
-                    continue;
+
+                    // Build the actual log command based on the inner verb
+                    let inner_command = match inner_first {
+                        "REGISTER" => {
+                            let user = match parts.next() { Some(s) => s, None => { Self::write_quiet(&mut w, b"ERR usage REGISTER <user> <ip>\n").await?; continue; } };
+                            let ip   = match parts.next() { Some(s) => s, None => { Self::write_quiet(&mut w, b"ERR usage REGISTER <user> <ip>\n").await?; continue; } };
+                            format!("REGISTER {} {}", user, ip)
+                        }
+                        "UNREGISTER" => {
+                            let user = match parts.next() { Some(s) => s, None => { Self::write_quiet(&mut w, b"ERR usage UNREGISTER <user>\n").await?; continue; } };
+                            format!("UNREGISTER {}", user)
+                        }
+                        "SET" => {
+                            let k = match parts.next() { Some(s) => s, None => { Self::write_quiet(&mut w, b"ERR usage SET <k> <v>\n").await?; continue; } };
+                            let v = parts.collect::<Vec<_>>().join(" ");
+                            if v.is_empty() { Self::write_quiet(&mut w, b"ERR usage SET <k> <v>\n").await?; continue; }
+                            format!("SET {} {}", k, v)
+                        }
+                        // Allow unknown inner verbs to be appended as-is (optional)
+                        other => {
+                            let rest = parts.collect::<Vec<_>>().join(" ");
+                            if rest.is_empty() { other.to_string() } else { format!("{} {}", other, rest) }
+                        }
+                    };
+
+                    // Append & replicate; mark idempotent id as processed
+                    self.append_and_replicate(inner_command).await;
+                    self.processed_ops.write().await.insert(op_id);
+                    Self::write_quiet(&mut w, b"OK\n").await?;
                 }
 
-                // Idempotency: if we've seen this op_id, acknowledge
-                {
-                    let seen = self.processed_ops.read().await;
-                    if seen.contains(&op_id) {
-                        w.write_all(b"OK\n").await?;
+                // Backward-compat direct writes (leader only)
+                Some("REGISTER") | Some("UNREGISTER") | Some("SET") => {
+                    if !matches!(*self.state.read().await, RaftState::Leader) {
+                        if let Some(lid) = *self.leader_hint.read().await {
+                            Self::write_quiet(&mut w, format!("REDIRECT {}\n", Self::client_addr_for(lid)).as_bytes()).await?;
+                        } else {
+                            Self::write_quiet(&mut w, b"RETRY\n").await?;
+                        }
                         continue;
                     }
+
+                    let reconstructed = cmd; // already the full line
+                    self.append_and_replicate(reconstructed).await;
+                    Self::write_quiet(&mut w, b"OK\n").await?;
                 }
 
-                let is_leader = matches!(*self.state.read().await, RaftState::Leader);
-                if !is_leader {
-                    if let Some(lid) = *self.leader_hint.read().await {
-                        let addr = NetNode::client_addr_for(lid);
-                        w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
-                    } else {
-                        w.write_all(b"NOT_LEADER\n").await?;
-                    }
-                    continue;
+                Some(_) | None => {
+                    Self::write_quiet(&mut w, b"ERR unknown\n").await?;
                 }
-
-                // Leader path: mark op_id seen, then append+replicate the payload
-                {
-                    let mut seen = self.processed_ops.write().await;
-                    seen.insert(op_id);
-                }
-                self.append_and_replicate(rest).await;
-                w.write_all(b"OK\n").await?;
-            }
-
-            Some("ENCRYPT_IMAGE") => {
-                if !is_leader {
-                    if let Some(lid) = *self.leader_hint.read().await {
-                        let addr = NetNode::client_addr_for(lid);
-                        w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
-                    } else {
-                        w.write_all(b"NOT_LEADER\n").await?;
-                    }
-                    continue;
-                }
-
-                // Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
-                let id = parts.next().unwrap_or_default().to_string();
-                let passphrase = parts.next().unwrap_or_default().to_string();
-                let input_path = parts.next().unwrap_or_default().to_string();
-                let output_path = parts.next().unwrap_or_default().to_string();
-
-                if id.is_empty() || passphrase.is_empty() || input_path.is_empty() || output_path.is_empty() {
-                    w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
-                    continue;
-                }
-
-                let command = format!("ENCRYPT_IMAGE {} {} {} {}", id, passphrase, input_path, output_path);
-                self.append_and_replicate(command).await;
-                w.write_all(b"OK\n").await?;
-            }
-
-            Some(unknown) => {
-                let s = format!("ERR unknown command: {}\n", unknown);
-                w.write_all(s.as_bytes()).await?;
-            }
-
-                None => {}
             }
         }
-        Ok(())
     }
 
-    // Append a command to this leader's log and replicate to peers
     async fn append_and_replicate(&self, command: String) {
         if !matches!(*self.state.read().await, RaftState::Leader) {
-            info!("Node {}: append ignored (not leader)", self.id);
             return;
         }
+
+        self.record_client_activity().await;
 
         let term = *self.current_term.read().await;
         let index = {
             let mut log = self.log.write().await;
-            let index = (log.len() as u64) + 1;
-            log.push(LogEntry { term, index, command: command.clone() });
-            index
+            let idx = (log.len() as u64) + 1;
+            log.push(LogEntry { term, index: idx, command: command.clone() });
+            idx
         };
-        info!("Node {}: appended new entry #{} '{}'", self.id, index, command);
+        debug!("[{}] appended #{} '{}'", self.id, index, command);
 
+        // DEMO: mark committed immediately (so LIST shows progress)
+        {
+            let mut ci = self.commit_index.write().await;
+            *ci = (*ci).max(index);
+        }
+
+        // Send AppendEntries to followers (best-effort)
         let term_now = *self.current_term.read().await;
         let commit_index = *self.commit_index.read().await;
         let log_snapshot = self.log.read().await;
 
         for (&peer_id, _) in self.peers.iter() {
             let next_index = {
-                let next_indices = self.next_index.read().await;
-                next_indices.get(&peer_id).copied().unwrap_or(1)
+                let map = self.next_index.read().await;
+                map.get(&peer_id).copied().unwrap_or(1)
             };
-
             let (prev_log_index, prev_log_term) = Self::prev_ptr(next_index, &log_snapshot);
-            let start_idx = next_index.saturating_sub(1);
-            let start_usize = usize::try_from(start_idx).unwrap_or(0);
-            let entries = if start_usize > log_snapshot.len() {
-                Vec::new()
+            let start_idx = next_index.saturating_sub(1) as usize;
+            let entries: Vec<LogEntry> = if start_idx > log_snapshot.len() {
+                vec![]
             } else {
-                log_snapshot[start_usize..].to_vec()
+                log_snapshot[start_idx..].to_vec()
             };
 
             let msg = RaftMessage::AppendEntries {
@@ -1226,24 +925,49 @@ impl NetNode {
             self.send_message(peer_id, msg).await;
         }
     }
+
+    fn client_addr_for(id: u32) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 9000 + id as u16))
+    }
 }
 
+/// ─────────────────────────────────────────────────────────────────────────────
+/// main
+/// ─────────────────────────────────────────────────────────────────────────────
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+
     let args = Args::parse();
+
+    // Parse peers
     let mut peers_map = HashMap::new();
     for pair in args.peers.split(',') {
-        if pair.trim().is_empty() { continue; }
-        if let Some((id_s, addr)) = pair.split_once('=') {
-            let id: u32 = id_s.parse()?;
-            let sa: SocketAddr = addr.parse()?;
-            peers_map.insert(id, sa);
-        }
+        let p = pair.trim();
+        if p.is_empty() { continue; }
+        let (id_s, addr) = match p.split_once('=') {
+            Some(x) => x,
+            None => {
+                error!("Bad peer spec '{}'; expected id=ip:port", p);
+                continue;
+            }
+        };
+        let id: u32 = id_s.parse()?;
+        let sa: SocketAddr = addr.parse()?;
+        peers_map.insert(id, sa);
     }
-    let listen: SocketAddr = args.addr.parse()?;
+
+    let listen_sa: SocketAddr = args.addr.parse()?;
+
+    // Default client port → 9000+id if user kept default 127.0.0.1:9000
+    let client_sa: SocketAddr = if args.client_addr == "127.0.0.1:9000" {
+        format!("127.0.0.1:{}", 9000 + args.id as u16).parse()?
+    } else {
+        args.client_addr.parse()?
+    };
+
     let node = Arc::new(NetNode::new(args.id, peers_map));
-    node.clone().start(listen).await?;
-    // keep alive
+    node.clone().start(listen_sa, client_sa).await?;
+
     loop { sleep(Duration::from_secs(3600)).await; }
 }
