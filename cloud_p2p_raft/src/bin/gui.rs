@@ -30,13 +30,18 @@ struct Args {
     /// Proxy address to talk to (must be the proxy's --listen)
     #[arg(long, default_value = "127.0.0.1:9100")]
     proxy_addr: String,
+
+    /// Public base URL for this GUI (reachable by nodes), e.g. http://192.168.8.41:8080
+    #[arg(long, default_value = "http://127.0.0.1:8080")]
+    public_base: String,
 }
 
 #[derive(Clone)]
 struct AppState {
     proxy_addr: Arc<String>,
     uploads_dir: Arc<PathBuf>,
-    stego_dir: Arc<PathBuf>,   // NEW: serve and scan the stego/ folder
+    stego_dir: Arc<PathBuf>,
+    public_base: Arc<String>, // NEW
 }
 
 /* =========================
@@ -71,26 +76,21 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let uploads_dir = PathBuf::from("uploads");
-    let stego_dir = PathBuf::from("stego"); // NEW
+    let stego_dir = PathBuf::from("stego");
     fs::create_dir_all(&uploads_dir).ok();
-    fs::create_dir_all(&stego_dir).ok();   // NEW
+    fs::create_dir_all(&stego_dir).ok();
 
     let state = AppState {
         proxy_addr: Arc::new(args.proxy_addr),
         uploads_dir: Arc::new(uploads_dir),
-        stego_dir: Arc::new(stego_dir),    // NEW
+        stego_dir: Arc::new(stego_dir),
+        public_base: Arc::new(args.public_base), // NEW
     };
 
-    // Serve both /files/uploads/* and /files/stego/* (so the browser can download them)
+    // Serve both /files/uploads/* and /files/stego/* so the browser can fetch them
     let files_router = Router::new()
-        .nest_service(
-            "/uploads",
-            ServeDir::new("uploads").append_index_html_on_directories(false),
-        )
-        .nest_service(
-            "/stego",
-            ServeDir::new("stego").append_index_html_on_directories(false),
-        );
+        .nest_service("/uploads", ServeDir::new("uploads").append_index_html_on_directories(false))
+        .nest_service("/stego",   ServeDir::new("stego").append_index_html_on_directories(false));
 
     let app = Router::new()
         .route("/", get(ui))
@@ -101,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/list", get(api_list))
         .route("/api/upload", post(api_upload))
         .route("/api/decrypt", post(api_decrypt))         // client-side decrypt
-        .route("/api/find-stego", get(api_find_stego))    // stego discovery for auto-download
+        .route("/api/find-stego", get(api_find_stego))    // poll for saved stego
+        .route("/api/push-stego", post(api_push_stego))   // NEW: nodes POST stego here
         .nest("/files", files_router)
         .with_state(state);
 
@@ -113,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /* =========================
-   UI (HTML) – light theme, robust layout
+   UI (HTML)
    ========================= */
 async fn ui() -> impl IntoResponse {
     const PAGE: &str = r#"<!doctype html>
@@ -124,94 +125,26 @@ async fn ui() -> impl IntoResponse {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root{
-      --bg: #f7f9fc;
-      --text: #1f2937;
-      --muted: #6b7280;
-      --card: #ffffff;
-      --border: #e5e7eb;
-      --accent: #2563eb;
-      --accent-700: #1d4ed8;
-      --ok: #16a34a;
-      --warn: #b45309;
+      --bg: #f7f9fc; --text: #1f2937; --muted: #6b7280; --card: #ffffff; --border: #e5e7eb;
+      --accent: #2563eb; --accent-700: #1d4ed8; --ok: #16a34a; --warn: #b45309;
     }
-    *{ box-sizing: border-box; }
-    body {
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      margin: 0;
-    }
-    .container{
-      max-width: 1120px;
-      margin: 0 auto;
-      padding: 24px 16px 56px;
-    }
-    h1{ margin:0 0 6px; font-size: 28px; line-height: 1.2; }
-    .sub{ color: var(--muted); margin-bottom: 18px; }
-
-    .grid{
-      display: grid;
-      gap: 16px;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      align-items: start;
-    }
-    .grid-2-1{
-      display: grid;
-      gap: 16px;
-      grid-template-columns: 2fr 1fr;
-    }
-    @media (max-width: 960px){
-      .grid-2-1{ grid-template-columns: 1fr; }
-    }
-
-    section{
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 16px;
-      box-shadow: 0 1px 2px rgba(0,0,0,.04);
-    }
-    section h2{
-      margin: 0 0 10px;
-      font-size: 18px;
-      display:flex; align-items:center; gap:8px;
-    }
-    .badge{
-      font-size: 12px; color: #1e40af; background: #e0e7ff;
-      border: 1px solid #c7d2fe; padding: 2px 8px; border-radius: 999px;
-    }
-
-    label{ display:block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
-    input[type="text"], input[type="password"], input[type="file"]{
-      width: 100%; padding: 10px 12px; border-radius: 10px;
-      border: 1px solid var(--border); background: #fff; color: var(--text);
-    }
-    input:focus{
-      outline: none; border-color: #c4d0ff; box-shadow: 0 0 0 3px rgba(37,99,235,.18);
-    }
-    .row{ display:grid; grid-template-columns: 1fr; gap:12px; }
-    @media (min-width: 720px){ .row{ grid-template-columns: 1fr 1fr; } }
-
-    .btns{ display:flex; gap:8px; flex-wrap: wrap; }
-    button{
-      cursor: pointer; border: 1px solid #d1d5db; background: #f9fafb; color: #111827;
-      padding: 8px 12px; border-radius: 10px; font-weight: 600;
-    }
-    button:hover{ background:#f3f4f6; }
-    .btn-accent{ background: var(--accent); border-color: var(--accent); color:#fff; }
-    .btn-accent:hover{ background: var(--accent-700); }
-    .btn-ok{ color:#fff; background: var(--ok); border-color: var(--ok); }
-    .btn-warn{ color:#fff; background: var(--warn); border-color: var(--warn); }
-
-    .out{
-      margin-top:10px; background:#f8fafc; border:1px solid var(--border);
-      border-radius:10px; padding:10px 12px; min-height: 44px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-      font-size: 13px; white-space: pre-wrap; overflow:auto; max-height: 220px;
-    }
-
-    .hint{ color: var(--muted); font-size: 12px; margin-top: 8px; }
-    .pill{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border); background:#fff; }
+    *{ box-sizing: border-box; } body{ font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); margin: 0; }
+    .container{ max-width: 1120px; margin: 0 auto; padding: 24px 16px 56px; }
+    h1{ margin:0 0 6px; font-size: 28px; line-height: 1.2; } .sub{ color: var(--muted); margin-bottom: 18px; }
+    .grid{ display:grid; gap:16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); align-items:start; }
+    .grid-2-1{ display:grid; gap:16px; grid-template-columns:2fr 1fr; } @media (max-width:960px){ .grid-2-1{ grid-template-columns:1fr; } }
+    section{ background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+    section h2{ margin:0 0 10px; font-size:18px; display:flex; align-items:center; gap:8px; }
+    .badge{ font-size:12px; color:#1e40af; background:#e0e7ff; border:1px solid #c7d2fe; padding:2px 8px; border-radius:999px; }
+    label{ display:block; font-size:13px; color:var(--muted); margin-bottom:6px; }
+    input[type="text"], input[type="password"], input[type="file"]{ width:100%; padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:#fff; color:var(--text); }
+    input:focus{ outline:none; border-color:#c4d0ff; box-shadow:0 0 0 3px rgba(37,99,235,.18); }
+    .row{ display:grid; grid-template-columns:1fr; gap:12px; } @media (min-width:720px){ .row{ grid-template-columns:1fr 1fr; } }
+    .btns{ display:flex; gap:8px; flex-wrap:wrap; } button{ cursor:pointer; border:1px solid #d1d5db; background:#f9fafb; color:#111827; padding:8px 12px; border-radius:10px; font-weight:600; }
+    button:hover{ background:#f3f4f6; } .btn-accent{ background:var(--accent); border-color:var(--accent); color:#fff; } .btn-accent:hover{ background:var(--accent-700); }
+    .btn-ok{ color:#fff; background:var(--ok); border-color:var(--ok); } .btn-warn{ color:#fff; background:var(--warn); border-color:var(--warn); }
+    .out{ margin-top:10px; background:#f8fafc; border:1px solid var(--border); border-radius:10px; padding:10px 12px; min-height:44px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:13px; white-space:pre-wrap; overflow:auto; max-height:220px; }
+    .hint{ color:var(--muted); font-size:12px; margin-top:8px; } .pill{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border); background:#fff; }
   </style>
 </head>
 <body>
@@ -219,52 +152,34 @@ async fn ui() -> impl IntoResponse {
     <h1>Cloud P2P GUI</h1>
     <div class="sub">Proxy-backed UI for your Raft cluster. Upload an image to encrypt & embed via the cluster. Manage users and inspect state.</div>
 
-    <!-- Top row: Upload (spans wider) + Leader -->
     <div class="grid-2-1">
       <section>
         <h2>🖼️ Upload & Encrypt <span class="badge">ENCRYPT_ON_CLOUD</span></h2>
         <form id="uploadForm">
           <div class="row">
-            <div>
-              <label>Image file</label>
-              <input type="file" name="file" required>
-            </div>
-            <div>
-              <label>Passphrase</label>
-              <input type="password" name="passphrase" placeholder="required by proxy">
-            </div>
+            <div><label>Image file</label><input type="file" name="file" required></div>
+            <div><label>Passphrase</label><input type="password" name="passphrase" placeholder="required by proxy"></div>
           </div>
-          <div style="margin-top:12px" class="btns">
-            <button type="submit" class="btn-accent">Upload & Encrypt</button>
-          </div>
+          <div style="margin-top:12px" class="btns"><button type="submit" class="btn-accent">Upload & Encrypt</button></div>
         </form>
         <div id="uploadOut" class="out"></div>
-        <div class="hint">Encrypted image will be saved under <span class="pill">uploads/</span> or <span class="pill">stego/</span> by the cluster. The GUI will auto-download it once detected.</div>
+        <div class="hint">Encrypted image will be saved under <span class="pill">stego/</span> on this GUI host. The page will auto-download it when ready.</div>
       </section>
 
       <section>
         <h2>👑 Leader</h2>
-        <div class="btns">
-          <button id="leaderBtn">LEADER</button>
-        </div>
+        <div class="btns"><button id="leaderBtn">LEADER</button></div>
         <div id="leaderOut" class="out"></div>
       </section>
     </div>
 
-    <!-- Second row: Users & Inspect side-by-side (auto-fit, no overlap) -->
     <div class="grid">
       <section>
         <h2>👤 Users — Register / Unregister</h2>
         <form id="regForm" style="margin-bottom:8px">
           <div class="row">
-            <div>
-              <label>User</label>
-              <input name="user" type="text" placeholder="alice" required>
-            </div>
-            <div>
-              <label>IP</label>
-              <input name="ip" type="text" placeholder="10.0.0.1" required>
-            </div>
+            <div><label>User</label><input name="user" type="text" placeholder="alice" required></div>
+            <div><label>IP</label><input name="ip" type="text" placeholder="10.0.0.1" required></div>
           </div>
           <div style="margin-top:8px" class="btns">
             <button type="submit" class="btn-ok">REGISTER</button>
@@ -280,35 +195,20 @@ async fn ui() -> impl IntoResponse {
           <button id="usersBtn">SHOW_USERS</button>
           <button id="listBtn">LIST</button>
         </div>
-        <div>
-          <label>SHOW_USERS Output</label>
-          <div id="usersOut" class="out"></div>
-        </div>
-        <div style="margin-top:10px">
-          <label>LIST Output</label>
-          <div id="listOut" class="out"></div>
-        </div>
+        <div><label>SHOW_USERS Output</label><div id="usersOut" class="out"></div></div>
+        <div style="margin-top:10px"><label>LIST Output</label><div id="listOut" class="out"></div></div>
       </section>
     </div>
 
-    <!-- Third row: Client-side Decrypt -->
     <div class="grid">
       <section>
         <h2>🗝️ Decrypt Local Image <span class="badge">client-side</span></h2>
         <form id="decryptForm">
           <div class="row">
-            <div>
-              <label>Stego image (PNG/JPEG)</label>
-              <input type="file" name="file" accept="image/png,image/jpeg" required>
-            </div>
-            <div>
-              <label>Passphrase</label>
-              <input type="password" name="passphrase" placeholder="the same key you used" required>
-            </div>
+            <div><label>Stego image (PNG/JPEG)</label><input type="file" name="file" accept="image/png,image/jpeg" required></div>
+            <div><label>Passphrase</label><input type="password" name="passphrase" placeholder="the same key you used" required></div>
           </div>
-          <div style="margin-top:12px" class="btns">
-            <button type="submit">Decrypt & Download Payload</button>
-          </div>
+          <div style="margin-top:12px" class="btns"><button type="submit">Decrypt & Download Payload</button></div>
         </form>
         <div id="decryptOut" class="out"></div>
         <div class="hint">Runs on the GUI server (not the cluster). If the payload is an image, it downloads with the right extension; otherwise falls back to <span class="pill">decrypted.bin</span>.</div>
@@ -320,21 +220,16 @@ async fn ui() -> impl IntoResponse {
     const $ = sel => document.querySelector(sel);
     const text = (id, s) => ($(id).textContent = s);
 
-    // Ask the server to locate the stego file path for this image_id
-    async function pollFindStego(imageId, timeoutMs = 15000) {
+    async function pollFindStego(imageId, timeoutMs = 20000) {
       const start = Date.now();
       while (Date.now() - start < timeoutMs) {
         const res = await fetch('/api/find-stego?image_id=' + encodeURIComponent(imageId));
-        if (res.ok) {
-          const json = await res.json();
-          return json.stego_path; // /files/uploads/<..> or /files/stego/<..>
-        }
+        if (res.ok) { const json = await res.json(); return json.stego_path; }
         await new Promise(r => setTimeout(r, 600));
       }
       return null;
     }
 
-    /* Upload & ENCRYPT_ON_CLOUD */
     $('#uploadForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
@@ -344,96 +239,52 @@ async fn ui() -> impl IntoResponse {
         const json = await res.json();
         text('#uploadOut', JSON.stringify(json, null, 2));
 
-        // Try to find the stego file and download it
         const imageId = json.image_id;
         const stegoPath = await pollFindStego(imageId);
         if (stegoPath) {
           const a = document.createElement('a');
           a.href = stegoPath;
-          const fileBase = stegoPath.split('/').pop() || `stego-${imageId}.png`;
-          a.download = fileBase;
+          a.download = stegoPath.split('/').pop() || `stego-${imageId}.png`;
           a.click();
-          text('#uploadOut', JSON.stringify(json, null, 2) + `\n✅ Stego downloaded: ${fileBase}`);
+          text('#uploadOut', JSON.stringify(json, null, 2) + `\n✅ Stego downloaded.`);
         } else {
           text('#uploadOut', JSON.stringify(json, null, 2) + `\n⚠️ Stego not found yet for ${imageId}`);
         }
       } catch (err) { text('#uploadOut', String(err)); }
     });
 
-    /* Register */
     $('#regForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const f = new FormData(e.target);
       const body = { user: f.get('user'), ip: f.get('ip') };
-      try {
-        const res = await fetch('/api/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-        });
-        text('#regOut', await res.text());
-      } catch (err) { text('#regOut', String(err)); }
+      try { const res = await fetch('/api/register', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) }); text('#regOut', await res.text()); }
+      catch (err) { text('#regOut', String(err)); }
     });
 
-    /* Unregister */
     $('#unregBtn').addEventListener('click', async () => {
-      const f = new FormData($('#regForm'));
-      const user = f.get('user');
-      try {
-        const res = await fetch('/api/unregister', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user })
-        });
-        text('#regOut', await res.text());
-      } catch (err) { text('#regOut', String(err)); }
+      const f = new FormData($('#regForm')); const user = f.get('user');
+      try { const res = await fetch('/api/unregister', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ user }) }); text('#regOut', await res.text()); }
+      catch (err) { text('#regOut', String(err)); }
     });
 
-    /* SHOW_USERS */
-    $('#usersBtn').addEventListener('click', async () => {
-      try { text('#usersOut', await (await fetch('/api/users')).text()); }
-      catch (err) { text('#usersOut', String(err)); }
-    });
+    $('#usersBtn').addEventListener('click', async () => { try { text('#usersOut', await (await fetch('/api/users')).text()); } catch (err) { text('#usersOut', String(err)); } });
+    $('#listBtn').addEventListener('click', async () => { try { text('#listOut', await (await fetch('/api/list')).text()); } catch (err) { text('#listOut', String(err)); } });
+    $('#leaderBtn').addEventListener('click', async () => { try { text('#leaderOut', await (await fetch('/api/leader')).text()); } catch (err) { text('#leaderOut', String(err)); } });
 
-    /* LIST */
-    $('#listBtn').addEventListener('click', async () => {
-      try { text('#listOut', await (await fetch('/api/list')).text()); }
-      catch (err) { text('#listOut', String(err)); }
-    });
-
-    /* LEADER */
-    $('#leaderBtn').addEventListener('click', async () => {
-      try { text('#leaderOut', await (await fetch('/api/leader')).text()); }
-      catch (err) { text('#leaderOut', String(err)); }
-    });
-
-    /* Client-side Decrypt */
     $('#decryptForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
       try {
         const res = await fetch('/api/decrypt', { method: 'POST', body: fd });
-        if (!res.ok) {
-          text('#decryptOut', await res.text());
-          return;
-        }
+        if (!res.ok) { text('#decryptOut', await res.text()); return; }
         const blob = await res.blob();
-        // Use server-provided filename if present
         const cd = res.headers.get('Content-Disposition') || '';
         let fname = 'decrypted.bin';
-        const m = cd.match(/filename="([^"]+)"/i);
-        if (m) fname = m[1];
-
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fname;
-        a.click();
-        URL.revokeObjectURL(url);
+        const m = cd.match(/filename="([^"]+)"/i); if (m) fname = m[1];
+        const url = URL.createObjectURL(blob); const a = document.createElement('a');
+        a.href = url; a.download = fname; a.click(); URL.revokeObjectURL(url);
         text('#decryptOut', '✅ Decryption successful — file downloaded as ' + fname);
-      } catch (err) {
-        text('#decryptOut', '❌ ' + err);
-      }
+      } catch (err) { text('#decryptOut', '❌ ' + err); }
     });
   </script>
 </body>
@@ -495,9 +346,7 @@ async fn api_upload(
     while let Ok(Some(field)) = mp.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         if name == "file" {
-            if let Some(fname) = field.file_name() {
-                filename = fname.to_string();
-            }
+            if let Some(fname) = field.file_name() { filename = fname.to_string(); }
             match field.bytes().await {
                 Ok(b) if !b.is_empty() => file_bytes = Some(b.to_vec()),
                 _ => return (StatusCode::BAD_REQUEST, "empty file").into_response(),
@@ -513,29 +362,71 @@ async fn api_upload(
     };
 
     let image_id = format!("img-{}", now_nanos());
-    let original_path = st
-        .uploads_dir
-        .join(format!("{}-{}", image_id, sanitize(&filename)));
+    let original_path = st.uploads_dir.join(format!("{}-{}", image_id, sanitize(&filename)));
 
     if let Err(e) = tokio_fs::write(&original_path, &bytes).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("write original: {e}")).into_response();
     }
 
-    // Ask the proxy to coordinate the cluster-side encryption/stego
+    // Ask the proxy to coordinate the cluster-side encryption/stego.
+    // Include a callback URL that nodes will POST the stego PNG to.
     let pass = passphrase.unwrap_or_default();
-    let cmd = format!("ENCRYPT_ON_CLOUD {} {}", image_id, pass);
+    let callback = format!("{}/api/push-stego", *st.public_base);
+    let cmd = format!("ENCRYPT_ON_CLOUD {} {} {}", image_id, pass, callback);
     let (status, resp) = proxy_send_oneline(&st.proxy_addr, &cmd).await;
 
     let resp = UploadResp {
         image_id,
-        original_path: format!(
-            "/files/uploads/{}",
-            original_path.file_name().unwrap().to_string_lossy()
-        ),
+        original_path: format!("/files/uploads/{}", original_path.file_name().unwrap().to_string_lossy()),
         status: resp,
     };
 
     (status, Json(resp)).into_response()
+}
+
+/* =========================
+   Nodes push stego here -> GUI saves to stego/
+   ========================= */
+async fn api_push_stego(
+    State(st): State<AppState>,
+    mut mp: Multipart,
+) -> impl IntoResponse {
+    let mut image_id = String::new();
+    let mut sha = String::new();
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut file_name: String = String::new();
+
+    while let Ok(Some(field)) = mp.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "image_id" => image_id = field.text().await.unwrap_or_default(),
+            "sha256"   => sha = field.text().await.unwrap_or_default(),
+            "file"     => {
+                if let Some(fname) = field.file_name() { file_name = fname.to_string(); }
+                file_bytes = Some(field.bytes().await.unwrap_or_default().to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    let bytes = match file_bytes {
+        Some(b) if !b.is_empty() => b,
+        _ => return (StatusCode::BAD_REQUEST, "missing file").into_response(),
+    };
+
+    if file_name.is_empty() { file_name = format!("{}.png", image_id); }
+
+    let path = st.stego_dir.join(&file_name);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio_fs::create_dir_all(parent).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir: {e}")).into_response();
+        }
+    }
+    if let Err(e) = tokio_fs::write(&path, &bytes).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("write: {e}")).into_response();
+    }
+
+    (StatusCode::OK, format!("OK image_id={} sha256={}", image_id, sha)).into_response()
 }
 
 /* =========================
@@ -549,7 +440,6 @@ async fn api_find_stego(
         return (StatusCode::BAD_REQUEST, "missing image_id").into_response();
     };
 
-    // Helper to scan a directory and return a served path prefix
     async fn scan_dir_for_id(dir: &PathBuf, web_prefix: &str, image_id: &str) -> Option<String> {
         if let Ok(mut rd) = tokio_fs::read_dir(dir).await {
             while let Ok(Some(entry)) = rd.next_entry().await {
@@ -565,12 +455,10 @@ async fn api_find_stego(
         None
     }
 
-    // 1) search uploads/
-    if let Some(p) = scan_dir_for_id(&st.uploads_dir, "/files/uploads", &image_id).await {
+    if let Some(p) = scan_dir_for_id(&st.stego_dir, "/files/stego", &image_id).await {
         return (StatusCode::OK, Json(FindStegoResp { stego_path: p })).into_response();
     }
-    // 2) search stego/
-    if let Some(p) = scan_dir_for_id(&st.stego_dir, "/files/stego", &image_id).await {
+    if let Some(p) = scan_dir_for_id(&st.uploads_dir, "/files/uploads", &image_id).await {
         return (StatusCode::OK, Json(FindStegoResp { stego_path: p })).into_response();
     }
 
@@ -604,13 +492,11 @@ async fn api_decrypt(
     };
     let pass = passphrase.unwrap_or_default();
 
-    // Decode the uploaded stego image to RGBA8
     let img_rgba = match image::load_from_memory(&bytes) {
         Ok(i) => i.to_rgba8(),
         Err(e) => return (StatusCode::BAD_REQUEST, format!("decode image: {e}")).into_response(),
     };
 
-    // Extract (nonce, ciphertext) from LSBs and decrypt
     let (nonce, ciphertext) = match extract_payload(&img_rgba) {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, format!("extract payload: {e}")).into_response(),
@@ -621,7 +507,6 @@ async fn api_decrypt(
         Err(e) => return (StatusCode::BAD_REQUEST, format!("decrypt: {e}")).into_response(),
     };
 
-    // Try to detect if plaintext is an image; set correct headers and filename
     let (content_type, filename) = match image::guess_format(&plaintext) {
         Ok(fmt) => {
             use image::ImageFormat::*;
@@ -724,9 +609,7 @@ async fn read_multiline(proxy_addr: &str, cmd_line: &str) -> anyhow::Result<Stri
    small utils
    ========================= */
 fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 fn now_nanos() -> u128 {
