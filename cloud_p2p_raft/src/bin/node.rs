@@ -136,19 +136,6 @@ struct NetNode {
     metrics: Arc<Metrics>,
 }
 
-async fn read_src_bytes(input: &str) -> anyhow::Result<Vec<u8>> {
-    if input.starts_with("http://") || input.starts_with("https://") {
-        let resp = reqwest::get(input).await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("GET {} failed with {}", input, resp.status());
-        }
-        Ok(resp.bytes().await?.to_vec())
-    } else {
-        Ok(tokio::fs::read(input).await?)
-    }
-}
-
-
 impl NetNode {
     pub fn new(id: u32, peers: HashMap<u32, SocketAddr>, client_addr: String) -> Self {
         let peers_arc = Arc::new(peers);
@@ -983,7 +970,7 @@ impl NetNode {
                             if let (Some(_id), Some(passphrase), Some(input_path), Some(output_path)) =
                                 (parts.next(), parts.next(), parts.next(), parts.next())
                             {
-                                match read_src_bytes(&input_path).await {
+                                match tokio::fs::read(&input_path).await {
                                     Ok(plaintext_bytes) => {
                                         let cover_path = "images/cover_image.PNG";
                                         match tokio::fs::read(cover_path).await {
@@ -1000,11 +987,10 @@ impl NetNode {
                                                                 continue;
                                                             }
                                                         }
-                                                        // (You were skipping file save; keep that behavior)
+                                                        // Skipping actual file save (as per your previous note)
                                                         info!(
-                                                            "Node {}: ENCRYPT_IMAGE OK ({} bytes embedded, sha256={}); source was {}",
-                                                            self.id, count, sha,
-                                                            if input_path.starts_with("http") { "URL" } else { "local path" }
+                                                            "Node {}: ENCRYPT_IMAGE computed successfully ({} bytes embedded, sha256={}), skipping file save",
+                                                            self.id, count, sha
                                                         );
                                                     }
                                                     Err(e) => error!("Node {}: encryption/embed failed: {:?}", self.id, e),
@@ -1013,7 +999,7 @@ impl NetNode {
                                             Err(e) => error!("Node {}: failed to read cover image {}: {:?}", self.id, cover_path, e),
                                         }
                                     }
-                                    Err(e) => error!("Node {}: failed to read source {}: {:?}", self.id, input_path, e),
+                                    Err(e) => error!("Node {}: failed to read {}: {:?}", self.id, input_path, e),
                                 }
                             } else {
                                 error!("Node {}: malformed ENCRYPT_IMAGE command '{}'", self.id, entry.command);
