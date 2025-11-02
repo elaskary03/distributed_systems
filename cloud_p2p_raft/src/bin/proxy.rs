@@ -1,11 +1,11 @@
 use clap::{Parser, ValueEnum};
 use rand::{distributions::Alphanumeric, Rng};
 use std::{
+    fs,
     net::SocketAddr,
+    path::Path,
     str::FromStr,
     time::Duration,
-    fs,
-    path::Path,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -13,14 +13,14 @@ use tokio::{
     time::sleep,
 };
 
-use cloud_p2p_raft::crypto::{extract_payload, decrypt_bytes};
-use image::GenericImageView; // (not strictly needed, but fine to keep)
-
+use cloud_p2p_raft::crypto::{decrypt_bytes, encrypt_and_embed_to_png, extract_payload};
+use image::GenericImageView; // optional
+use reqwest::multipart::{Form, Part};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
-    /// Proxy listen address (what your users connect to), e.g. 0.0.0.0:9100
+    /// Proxy listen address (what the GUI connects to), e.g. 0.0.0.0:9100
     #[arg(long, default_value = "127.0.0.1:9100")]
     listen: String,
 
@@ -92,9 +92,9 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
     let mut reader = BufReader::new(r);
     let mut line = String::new();
 
-    // Present a simple banner (your proxy protocol)
+    // Simple banner (proxy protocol)
     w.write_all(b"Welcome to Cloud P2P Proxy!\n").await?;
-    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
+    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | ENCRYPT_ON_CLOUD <image_id> <passphrase> <input_url> <callback> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
 
     loop {
         line.clear();
@@ -112,7 +112,6 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
 
         match cmd {
             "REGISTER" => {
-                // mutate with idempotent SUBMIT
                 let user = match parts.next() {
                     Some(x) => x,
                     None => { w.write_all(b"Usage: REGISTER <user> <ip>\n").await?; continue; }
@@ -121,7 +120,6 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
                     Some(x) => x,
                     None => { w.write_all(b"Usage: REGISTER <user> <ip>\n").await?; continue; }
                 };
-
                 let op_id = next_op_id();
                 let payload = format!("SUBMIT {} REGISTER {} {}", op_id, user, ip);
                 let resp = submit_idempotent(&seeds, &cfg, &payload).await;
@@ -133,7 +131,6 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
                     Some(x) => x,
                     None => { w.write_all(b"Usage: UNREGISTER <user>\n").await?; continue; }
                 };
-
                 let op_id = next_op_id();
                 let payload = format!("SUBMIT {} UNREGISTER {}", op_id, user);
                 let resp = submit_idempotent(&seeds, &cfg, &payload).await;
@@ -141,7 +138,6 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
             }
 
             "SHOW_USERS" => {
-                // read-only; ask any node until success, return raw (multi-line)
                 match query_any(&seeds, "SHOW_USERS").await {
                     Ok(s) => w.write_all(s.as_bytes()).await?,
                     Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
@@ -156,7 +152,6 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
             }
 
             "LEADER" => {
-                // Try to discover the leader by asking nodes
                 match find_leader(&seeds).await {
                     Ok(Some(line)) => w.write_all(line.as_bytes()).await?,
                     Ok(None) => w.write_all(b"NO_LEADER\n").await?,
@@ -164,119 +159,177 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
                 }
             }
 
+            // Forward to the cluster (old path: requires local files on the node)
             "ENCRYPT_IMAGE" => {
-            // Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
-            let id = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
-            let pass = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
-            let input_path = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
-            let output_path = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
+                let id = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+                };
+                let pass = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+                };
+                let input_path = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+                };
+                let output_path = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+                };
 
-            let op_id = next_op_id();
-            let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}", op_id, id, pass, input_path, output_path);
-            let resp = submit_idempotent(&seeds, &cfg, &payload).await;
-            write_line(&mut w, resp).await?;
+                let op_id = next_op_id();
+                let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}", op_id, id, pass, input_path, output_path);
+                let resp = submit_idempotent(&seeds, &cfg, &payload).await;
+                write_line(&mut w, resp).await?;
             }
 
+            // NEW: proxy performs the encryption itself using a URL + posts back to GUI
             "ENCRYPT_ON_CLOUD" => {
-            // Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>
-            let image_id = match parts.next() {
-                Some(x) if !x.is_empty() => x,
-                _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n").await?; continue; }
-            };
-            let pass = match parts.next() {
-                Some(x) => x,
-                _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n").await?; continue; }
-            };
+                // ENCRYPT_ON_CLOUD <image_id> <passphrase> <input_url> <callback>
+                let image_id = match parts.next() {
+                    Some(x) if !x.is_empty() => x,
+                    _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase> <input_url> <callback>\n").await?; continue; }
+                };
+                let pass = match parts.next() {
+                    Some(x) => x,
+                    _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase> <input_url> <callback>\n").await?; continue; }
+                };
+                let input_url = match parts.next() {
+                    Some(x) => x,
+                    _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase> <input_url> <callback>\n").await?; continue; }
+                };
+                let callback = match parts.next() {
+                    Some(x) => x,
+                    _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase> <input_url> <callback>\n").await?; continue; }
+                };
 
-            // Find the uploaded file saved by the GUI (pattern: uploads/<image_id>-<original_name>)
-            let input_path = match find_upload_by_prefix("uploads", image_id) {
-                Ok(p) => p,
-                Err(e) => {
-                    w.write_all(format!("ERR input not found: {}\n", e).as_bytes()).await?;
+                // 1) Download original bytes from GUI's public URL
+                let original_bytes = match reqwest::get(input_url).await {
+                    Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                        Ok(b) => b.to_vec(),
+                        Err(e) => { w.write_all(format!("ERR read body: {e}\n").as_bytes()).await?; continue; }
+                    },
+                    Ok(resp) => {
+                        w.write_all(format!("ERR download {} -> HTTP {}\n", input_url, resp.status()).as_bytes()).await?;
+                        continue;
+                    }
+                    Err(e) => { w.write_all(format!("ERR download {}: {e}\n", input_url).as_bytes()).await?; continue; }
+                };
+
+                // 2) Read cover image (repo has images/cover_image.png)
+                let cover_path = "images/cover_image.png";
+                let cover_bytes = match fs::read(cover_path) {
+                    Ok(b) => b,
+                    Err(e) => { w.write_all(format!("ERR read cover {}: {e}\n", cover_path).as_bytes()).await?; continue; }
+                };
+
+                // 3) Encrypt & embed -> PNG bytes
+                let (stego_png, sha_hex, _count) = match encrypt_and_embed_to_png(
+                    pass.as_bytes(),
+                    &original_bytes,
+                    &cover_bytes,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        w.write_all(format!("ERR encrypt/embed: {e}\n").as_bytes()).await?;
+                        continue;
+                    }
+                };
+
+                // 4) Save to local stego/<image_id>.png (so GUI can also GET it via /files/stego)
+                let out_path = format!("stego/{}.png", image_id);
+                if let Some(parent) = Path::new(&out_path).parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Err(e) = fs::write(&out_path, &stego_png) {
+                    w.write_all(format!("ERR write {}: {e}\n", out_path).as_bytes()).await?;
                     continue;
                 }
-            };
 
-            // Output goes to stego/<image_id>.png (uniform & predictable)
-            let output_path = format!("stego/{}.png", image_id);
-            if let Some(parent) = Path::new(&output_path).parent() {
-                let _ = fs::create_dir_all(parent);
+                // 5) POST back to GUI callback as multipart (image_id, sha256, file)
+                let part = reqwest::multipart::Part::bytes(stego_png.clone())
+                    .file_name(format!("{}.png", image_id))
+                    .mime_str("image/png")
+                    .unwrap();
+                let form = reqwest::multipart::Form::new()
+                    .text("image_id", image_id.to_string())
+                    .text("sha256", sha_hex.clone())
+                    .part("file", part);
+
+                match reqwest::Client::new().post(callback).multipart(form).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        // fine
+                    }
+                    Ok(resp) => {
+                        w.write_all(format!("ERR callback {} -> HTTP {}\n", callback, resp.status()).as_bytes()).await?;
+                        continue;
+                    }
+                    Err(e) => {
+                        w.write_all(format!("ERR callback {}: {e}\n", callback).as_bytes()).await?;
+                        continue;
+                    }
+                }
+
+                w.write_all(b"OK\n").await?;
             }
 
-            let op_id = next_op_id();
-            let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}",
-                op_id, image_id, pass, input_path, output_path);
+            "DECRYPT_IMAGE" => {
+                // Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>
+                let pass = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
+                };
+                let stego_path = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
+                };
+                let output_path = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
+                };
 
-            let resp = submit_idempotent(&seeds, &cfg, &payload).await;
-            write_line(&mut w, resp).await?;
-        }
-        "DECRYPT_IMAGE" => {
-        // Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>
-        let pass = match parts.next() {
-            Some(x) => x,
-            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
-        };
-        let stego_path = match parts.next() {
-            Some(x) => x,
-            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
-        };
-        let output_path = match parts.next() {
-            Some(x) => x,
-            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
-        };
+                // Read the stego PNG
+                let bytes = match fs::read(stego_path) {
+                    Ok(b) => b,
+                    Err(e) => { w.write_all(format!("ERR read stego: {e}\n").as_bytes()).await?; continue; }
+                };
 
-        // Read the stego PNG
-        let bytes = match fs::read(stego_path) {
-            Ok(b) => b,
-            Err(e) => { w.write_all(format!("ERR read stego: {e}\n").as_bytes()).await?; continue; }
-        };
+                // Decode image -> RGBA
+                let img = match image::load_from_memory(&bytes) {
+                    Ok(i) => i.to_rgba8(),
+                    Err(e) => { w.write_all(format!("ERR decode stego PNG: {e}\n").as_bytes()).await?; continue; }
+                };
 
-        // Decode image -> RGBA
-        let img = match image::load_from_memory(&bytes) {
-            Ok(i) => i.to_rgba8(),
-            Err(e) => { w.write_all(format!("ERR decode stego PNG: {e}\n").as_bytes()).await?; continue; }
-        };
+                // Extract payload (nonce + ciphertext)
+                let (nonce, ciphertext) = match extract_payload(&img) {
+                    Ok(t) => t,
+                    Err(e) => { w.write_all(format!("ERR extract payload: {e}\n").as_bytes()).await?; continue; }
+                };
 
-        // Extract payload (nonce + ciphertext)
-        let (nonce, ciphertext) = match extract_payload(&img) {
-            Ok(t) => t,
-            Err(e) => { w.write_all(format!("ERR extract payload: {e}\n").as_bytes()).await?; continue; }
-        };
+                // Decrypt
+                let plaintext = match decrypt_bytes(pass.as_bytes(), &nonce, &ciphertext) {
+                    Ok(p) => p,
+                    Err(e) => { w.write_all(format!("ERR decrypt embedded ciphertext: {e}\n").as_bytes()).await?; continue; }
+                };
 
-        // Decrypt
-        let plaintext = match decrypt_bytes(pass.as_bytes(), &nonce, &ciphertext) {
-            Ok(p) => p,
-            Err(e) => { w.write_all(format!("ERR decrypt embedded ciphertext: {e}\n").as_bytes()).await?; continue; }
-        };
+                // Ensure output dir exists
+                if let Some(parent) = Path::new(output_path).parent() {
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        w.write_all(format!("ERR create_dir_all {:?}: {e}\n", parent).as_bytes()).await?;
+                        continue;
+                    }
+                }
 
-        // Ensure output dir exists
-        if let Some(parent) = Path::new(output_path).parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                w.write_all(format!("ERR create_dir_all {:?}: {e}\n", parent).as_bytes()).await?;
-                continue;
+                // Write recovered bytes
+                if let Err(e) = fs::write(output_path, &plaintext) {
+                    w.write_all(format!("ERR write output: {e}\n").as_bytes()).await?;
+                    continue;
+                }
+
+                w.write_all(b"OK\n").await?;
             }
-        }
 
-        // Write recovered bytes
-        if let Err(e) = fs::write(output_path, &plaintext) {
-            w.write_all(format!("ERR write output: {e}\n").as_bytes()).await?;
-            continue;
-        }
-
-        w.write_all(b"OK\n").await?;
-    }
             _ => {
                 w.write_all(format!("ERR unknown command: {}\n", cmd).as_bytes()).await?;
             }
@@ -287,17 +340,12 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
 }
 
 async fn write_line(
-     w: &mut tokio::net::tcp::OwnedWriteHalf,
-     resp: Result<String, anyhow::Error>
- ) -> anyhow::Result<()> {
+    w: &mut tokio::net::tcp::OwnedWriteHalf,
+    resp: Result<String, anyhow::Error>,
+) -> anyhow::Result<()> {
     match resp {
-        Ok(s) => {
-            // We expect single-line like "OK\n" or "REDIRECT ...\n"
-            w.write_all(s.as_bytes()).await?;
-        }
-        Err(e) => {
-            w.write_all(format!("ERR {}\n", e).as_bytes()).await?;
-        }
+        Ok(s) => { w.write_all(s.as_bytes()).await?; }
+        Err(e) => { w.write_all(format!("ERR {}\n", e).as_bytes()).await?; }
     }
     Ok(())
 }
@@ -306,18 +354,15 @@ async fn write_line(
    Core forwarding helpers
    ============================ */
 
-/// End-to-end idempotent submit with initial try + redirect + retries + backoff.
 async fn submit_idempotent(
     seeds: &[SocketAddr],
     cfg: &ProxyCfg,
     cmd_line: &str,
 ) -> Result<String, anyhow::Error> {
-    // initial attempt
     let mut last_err: Option<anyhow::Error> = None;
 
     match cfg.first_try {
         FirstTry::Broadcast => {
-            // fire concurrently; first OK wins
             let mut tasks = Vec::new();
             for &addr in seeds {
                 let line = cmd_line.to_string();
@@ -329,7 +374,7 @@ async fn submit_idempotent(
                     Ok(Resp::Redirect(to)) => {
                         if let Ok(s) = send_once(&to, cmd_line).await { return Ok(s); }
                     }
-                    Ok(Resp::NotLeader) => { /* wait for any OK from others */ }
+                    Ok(Resp::NotLeader) => {}
                     Ok(Resp::Other(s)) => return Ok(s),
                     Err(e) => last_err = Some(e.into()),
                 }
@@ -342,7 +387,7 @@ async fn submit_idempotent(
                     Ok(Resp::Redirect(to)) => {
                         if let Ok(s) = send_once(&to, cmd_line).await { return Ok(s); }
                     }
-                    Ok(Resp::NotLeader) => { /* try next */ }
+                    Ok(Resp::NotLeader) => {}
                     Ok(Resp::Other(s)) => return Ok(s),
                     Err(e) => last_err = Some(e.into()),
                 }
@@ -350,7 +395,6 @@ async fn submit_idempotent(
         }
     }
 
-    // retries with backoff (handles leader failover)
     let mut backoff = Duration::from_millis(cfg.backoff_ms);
     for _ in 0..cfg.max_retries {
         for &addr in seeds {
@@ -372,7 +416,6 @@ async fn submit_idempotent(
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("submit failed")))
 }
 
-/// Send a one-off command to a specific node and parse the first line.
 async fn talk_once(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<Resp> {
     let mut s = TcpStream::connect(addr).await?;
     let (r, mut w) = s.split();
@@ -390,7 +433,6 @@ async fn talk_once(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<Resp> {
     parse_first_line(&mut reader).await
 }
 
-/// If redirected, reconnect to that address and resend once.
 async fn send_once(to: &str, cmd_line: &str) -> anyhow::Result<String> {
     let addr: SocketAddr = to.parse()?;
     let mut s = TcpStream::connect(addr).await?;
@@ -432,17 +474,15 @@ async fn parse_first_line(reader: &mut BufReader<tokio::net::tcp::ReadHalf<'_>>)
     if let Some(rest) = trimmed.strip_prefix("REDIRECT ") {
         return Ok(Resp::Redirect(rest.to_string()));
     }
-    Ok(Resp::Other(line)) // For LIST/SHOW_USERS we may get multi-line; caller will handle.
+    Ok(Resp::Other(line))
 }
 
-/// Read-only helper: try each seed until one returns something.
-/// This reads *until EOF or socket close*, which works with your current node's single-line loop output.
 async fn query_any(seeds: &[SocketAddr], cmd_line: &str) -> anyhow::Result<String> {
     let mut last_err: Option<anyhow::Error> = None;
-
     for &addr in seeds {
-        if let Ok(s) = read_multiline(addr, cmd_line).await {
-            return Ok(s);
+        match read_multiline(addr, cmd_line).await {
+            Ok(s) => return Ok(s),
+            Err(e) => last_err = Some(e),
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no node responded")))
@@ -470,15 +510,9 @@ async fn read_multiline(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<Stri
                 let n = n?;
                 if n == 0 { break; }
                 out.push_str(&buf);
-                // Only LEADER is guaranteed single-line; keep it snappy.
-                if cmd_line == "LEADER" {
-                    break;
-                }
+                if cmd_line == "LEADER" { break; }
             }
-            _ = sleep(Duration::from_millis(100)) => {
-                // brief idle; assume node finished writing
-                break;
-            }
+            _ = sleep(Duration::from_millis(100)) => { break; }
         }
     }
     if out.is_empty() {
@@ -538,12 +572,12 @@ fn now_nanos() -> u128 {
         .as_nanos()
 }
 
+#[allow(dead_code)]
 fn find_upload_by_prefix(dir: &str, image_id_prefix: &str) -> anyhow::Result<String> {
     let mut chosen: Option<String> = None;
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
-        // GUI saves as "<image_id>-<sanitized-filename>"
         if name.starts_with(&format!("{}-", image_id_prefix)) {
             let p = entry.path().to_string_lossy().to_string();
             chosen = Some(p);

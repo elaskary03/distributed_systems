@@ -368,11 +368,21 @@ async fn api_upload(
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("write original: {e}")).into_response();
     }
 
+    // NEW: Build a public URL that nodes can GET, then include it in the command
+    let public_upload_url = format!(
+        "{}/files/uploads/{}",
+        *st.public_base,
+        original_path.file_name().unwrap().to_string_lossy()
+    );
+
     // Ask the proxy to coordinate the cluster-side encryption/stego.
-    // Include a callback URL that nodes will POST the stego PNG to.
+    // Include input_url and a callback URL that nodes will POST the stego PNG to.
     let pass = passphrase.unwrap_or_default();
     let callback = format!("{}/api/push-stego", *st.public_base);
-    let cmd = format!("ENCRYPT_ON_CLOUD {} {} {}", image_id, pass, callback);
+    let cmd = format!(
+        "ENCRYPT_ON_CLOUD {} {} {} {}",
+        image_id, pass, public_upload_url, callback
+    );
     let (status, resp) = proxy_send_oneline(&st.proxy_addr, &cmd).await;
 
     let resp = UploadResp {
