@@ -9,7 +9,7 @@ use tokio::time::{sleep, Duration, Instant};
 use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
 use std::path::Path;
@@ -33,9 +33,6 @@ struct Args {
     /// Client API listen address (e.g. "0.0.0.0:9001")
     #[arg(long, default_value = "127.0.0.1:9000")]
     client_addr: String,
-    /// Max concurrent client connections
-    #[arg(long, default_value = "1000")]
-    max_client_connections: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,7 +110,6 @@ struct Metrics {
     tasks_executed_local: AtomicU64,
     tasks_executed_delegated: AtomicU64,
     delegated_sent_total: AtomicU64,
-    active_client_connections: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -138,11 +134,10 @@ struct NetNode {
     load_table: Arc<RwLock<HashMap<u32, (u32, u128)>>>,
     client_addr: String,
     metrics: Arc<Metrics>,
-    max_client_connections: usize,
 }
 
 impl NetNode {
-    pub fn new(id: u32, peers: HashMap<u32, SocketAddr>, client_addr: String, max_client_connections: usize) -> Self {
+    pub fn new(id: u32, peers: HashMap<u32, SocketAddr>, client_addr: String) -> Self {
         let peers_arc = Arc::new(peers);
         let peer_ids: Vec<u32> = peers_arc.keys().cloned().collect();
 
@@ -156,7 +151,6 @@ impl NetNode {
         Self {
             id,
             client_addr,
-            max_client_connections,
             state: Arc::new(RwLock::new(RaftState::Follower)),
             current_term: Arc::new(RwLock::new(0)),
             voted_for: Arc::new(RwLock::new(None)),
@@ -205,18 +199,16 @@ impl NetNode {
         )
     }
 
-    // ---------- Metrics helpers ----------
+    // ---------- Metrics helpers (no command needed) ----------
     fn metrics_request_start(&self) -> Instant {
         self.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
         Instant::now()
     }
-    
     fn metrics_ok(&self, start: Instant) {
         let ns = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
         self.metrics.latency_sum_ns.fetch_add(ns, Ordering::Relaxed);
         self.metrics.latency_count.fetch_add(1, Ordering::Relaxed);
     }
-    
     fn metrics_fail(&self, start: Instant) {
         self.metrics.failures_total.fetch_add(1, Ordering::Relaxed);
         self.metrics_ok(start);
@@ -232,40 +224,30 @@ impl NetNode {
             .ok_or_else(|| anyhow::anyhow!("no leader hint"))?;
         let addr = self.client_addr_for(lid);
 
-        info!("Node {}: Forwarding to leader {} at {}", self.id, lid, addr);
-
-        let stream = tokio::time::timeout(
-            Duration::from_secs(5),
-            TcpStream::connect(&addr)
-        ).await
-            .map_err(|_| anyhow::anyhow!("connection timeout to leader"))?
-            .map_err(|e| anyhow::anyhow!("failed to connect to leader: {}", e))?;
-
+        let stream = TcpStream::connect(addr).await?;
         let (r, mut w) = stream.into_split();
         let mut reader = BufReader::new(r);
 
-        // Read banner with timeout
         let mut tmp = String::new();
-        tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut tmp)).await??;
+        reader.read_line(&mut tmp).await?;
         tmp.clear();
-        tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut tmp)).await??;
+        reader.read_line(&mut tmp).await?;
 
         w.write_all(cmd_line.as_bytes()).await?;
         w.write_all(b"\n").await?;
 
+        use tokio::time::{timeout, Duration};
         let mut out = String::new();
+
         let mut buf = String::new();
-        
-        // First line with reasonable timeout
-        match tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut buf)).await {
+        match timeout(Duration::from_millis(500), reader.read_line(&mut buf)).await {
             Ok(Ok(n)) if n > 0 => out.push_str(&buf),
             _ => return Ok(out),
         }
 
-        // Additional lines with shorter timeout
         loop {
             buf.clear();
-            match tokio::time::timeout(Duration::from_millis(200), reader.read_line(&mut buf)).await {
+            match timeout(Duration::from_millis(120), reader.read_line(&mut buf)).await {
                 Ok(Ok(n)) if n > 0 => out.push_str(&buf),
                 _ => break,
             }
@@ -277,11 +259,11 @@ impl NetNode {
         let listener = loop {
             match TcpListener::bind(listen_addr).await {
                 Ok(l) => {
-                    info!("✅ Node {} listening on {}", self.id, listen_addr);
+                    info!("Node {} listening on {}", self.id, listen_addr);
                     break l;
                 }
                 Err(e) => {
-                    error!("❌ Failed to bind to {}: {}. Retrying in 5 seconds...", listen_addr, e);
+                    error!("Failed to bind to {}: {}. Retrying in 5 seconds...", listen_addr, e);
                     sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -301,7 +283,7 @@ impl NetNode {
                         log.push(LogEntry { term, index, command: line.clone() });
                         drop(log);
 
-                        info!("📝 Node {}: appended new entry {}", input_node.id, line);
+                        info!("Node {}: appended new entry {}", input_node.id, line);
 
                         let term = *input_node.current_term.read().await;
                         let commit_index = *input_node.commit_index.read().await;
@@ -333,7 +315,7 @@ impl NetNode {
                         }
                     } else {
                         info!(
-                            "⚠️  Node {}: not leader; ignoring local command '{}'",
+                            "Node {}: not leader; ignoring local command '{}'",
                             input_node.id, line
                         );
                     }
@@ -347,16 +329,16 @@ impl NetNode {
             loop {
                 match listener.accept().await {
                     Ok((stream, addr)) => {
-                        info!("🔌 Node {} accepted Raft connection from {}", node.id, addr);
+                        info!("Node {} accepted connection from {}", node.id, addr);
                         let n = node.clone();
                         tokio::spawn(async move {
                             if let Err(e) = n.handle_inbound(stream).await {
-                                error!("❌ Inbound handler error from {}: {}", addr, e);
+                                error!("Inbound handler error from {}: {}", addr, e);
                             }
                         });
                     }
                     Err(e) => {
-                        error!("❌ Accept error: {}. Continuing...", e);
+                        error!("Accept error: {}. Continuing...", e);
                         sleep(Duration::from_secs(1)).await;
                     }
                 }
@@ -370,17 +352,17 @@ impl NetNode {
                 let mut backoff = Duration::from_secs(1);
                 const MAX_BACKOFF: Duration = Duration::from_secs(30);
                 loop {
-                    debug!("🔄 Node {} connecting to peer {} at {}", node.id, peer_id, addr);
+                    info!("Node {} connecting to peer {} at {}", node.id, peer_id, addr);
                     match TcpStream::connect(addr).await {
                         Ok(stream) => {
-                            info!("✅ Node {} connected to {} at {}", node.id, peer_id, addr);
+                            info!("Node {} connected to {} at {}", node.id, peer_id, addr);
                             backoff = Duration::from_secs(1);
                             if let Err(e) = node.handle_outbound(peer_id, stream).await {
-                                warn!("⚠️  Outbound {} -> {} failed: {}", node.id, peer_id, e);
+                                error!("Outbound {} -> {} failed: {}", node.id, peer_id, e);
                             }
                         }
                         Err(e) => {
-                            warn!("⚠️  Connect to {} at {} failed: {}. Retrying in {:?}...", peer_id, addr, e, backoff);
+                            error!("Connect to {} at {} failed: {}. Retrying in {:?}...", peer_id, addr, e, backoff);
                             sleep(backoff).await;
                             backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
                         }
@@ -402,13 +384,13 @@ impl NetNode {
                     if connected.contains(&peer_id) {
                         continue;
                     }
-                    debug!("🔄 Node {} missing connection to {}, retrying...", reconnect_node.id, peer_id);
+                    info!("Node {} missing connection to {}, retrying...", reconnect_node.id, peer_id);
                     let node_clone = reconnect_node.clone();
                     tokio::spawn(async move {
                         if let Ok(stream) = TcpStream::connect(addr).await {
-                            info!("✅ Node {} reconnected to {}", node_clone.id, peer_id);
+                            info!("Node {} reconnected to {}", node_clone.id, peer_id);
                             if let Err(e) = node_clone.handle_outbound(peer_id, stream).await {
-                                warn!("⚠️  Reconnection to {} failed: {}", peer_id, e);
+                                error!("Reconnection to {} failed: {}", peer_id, e);
                             }
                         }
                     });
@@ -436,7 +418,7 @@ impl NetNode {
         tokio::spawn(async move {
             let client_addr: std::net::SocketAddr = client_node.client_addr.parse().expect("parse client addr");
             if let Err(e) = client_node.run_client_api(client_addr).await {
-                error!("❌ client API failed: {:?}", e);
+                error!("client API failed: {:?}", e);
             }
         });
 
@@ -456,19 +438,18 @@ impl NetNode {
 
             loop {
                 match listener.accept().await {
-                    Ok((mut stream, peer)) => {
-                        debug!("🔌 Node {} received delegate connection from {}", delegate_node.id, peer);
+                    Ok((mut stream, _)) => {
                         let mut buf = String::new();
                         let mut reader = BufReader::new(&mut stream);
                         if reader.read_line(&mut buf).await.is_ok() {
                             let cmd = buf.trim();
-                            info!("🎯 Node {} received delegated command: {}", delegate_node.id, cmd);
+                            info!("Node {} received delegated command: {}", delegate_node.id, cmd);
                             {
                                 let mut p = delegate_node.local_pending.write().await;
                                 *p = p.saturating_add(1);
                             }
                             if let Err(e) = delegate_node.execute_delegated(cmd).await {
-                                error!("❌ Node {} delegated exec error: {:?}", delegate_node.id, e);
+                                error!("Node {} delegated exec error: {:?}", delegate_node.id, e);
                             }
                             {
                                 let mut p = delegate_node.local_pending.write().await;
@@ -477,7 +458,7 @@ impl NetNode {
                         }
                     }
                     Err(e) => {
-                        error!("❌ Delegate listener error: {:?}", e);
+                        error!("Delegate listener error: {:?}", e);
                     }
                 }
             }
@@ -511,7 +492,7 @@ impl NetNode {
             }
         });
 
-        // metrics CSV writer
+        // metrics CSV writer (no command; always on)
         let metrics_clone = self.clone();
         tokio::spawn(async move {
             let filename = format!("metrics-node-{}.csv", metrics_clone.id);
@@ -522,7 +503,7 @@ impl NetNode {
                     .open(&filename)
                     .await
                 {
-                    let header = "timestamp,node_id,requests_total,failures_total,elections_won,tasks_executed_local,tasks_executed_delegated,delegated_sent_total,latency_avg_ms,active_connections\n";
+                    let header = "timestamp,node_id,requests_total,failures_total,elections_won,tasks_executed_local,tasks_executed_delegated,delegated_sent_total,latency_avg_ms\n";
                     let _ = f.write_all(header.as_bytes()).await;
                 }
             }
@@ -543,7 +524,6 @@ impl NetNode {
                 let sent = metrics_clone.metrics.delegated_sent_total.load(Ordering::Relaxed);
                 let lat_sum = metrics_clone.metrics.latency_sum_ns.load(Ordering::Relaxed);
                 let lat_cnt = metrics_clone.metrics.latency_count.load(Ordering::Relaxed);
-                let active_conns = metrics_clone.metrics.active_client_connections.load(Ordering::Relaxed);
                 let avg_ms = if lat_cnt > 0 {
                     (lat_sum as f64 / lat_cnt as f64) / 1_000_000.0
                 } else {
@@ -551,7 +531,7 @@ impl NetNode {
                 };
 
                 let line = format!(
-                    "{},{},{},{},{},{},{},{},{:.2},{}\n",
+                    "{},{},{},{},{},{},{},{},{}\n",
                     ts,
                     metrics_clone.id,
                     req,
@@ -560,8 +540,7 @@ impl NetNode {
                     local,
                     delegated,
                     sent,
-                    avg_ms,
-                    active_conns
+                    avg_ms
                 );
 
                 if let Ok(mut f) = OpenOptions::new().append(true).open(&filename).await {
@@ -574,18 +553,14 @@ impl NetNode {
     }
 
     async fn handle_inbound(&self, stream: TcpStream) -> anyhow::Result<()> {
-        let peer = stream.peer_addr()?;
         let mut framed = FramedRead::new(stream, LengthDelimitedCodec::new());
         while let Some(frame_res) = framed.next().await {
             let frame = frame_res?;
             let vec = frame.to_vec();
             if let Ok(msg) = serde_json::from_slice::<RaftMessage>(&vec) {
                 self.handle_message(msg).await;
-            } else {
-                warn!("⚠️  Node {}: Failed to parse Raft message from {}", self.id, peer);
             }
         }
-        debug!("🔌 Node {}: Inbound connection from {} closed", self.id, peer);
         Ok(())
     }
 
@@ -613,26 +588,23 @@ impl NetNode {
             let mut out = self.outbound.lock().await;
             out.remove(&peer_id);
         }
-        
-        debug!("🔌 Node {}: Outbound connection to {} closed", self.id, peer_id);
+
         result
     }
 
     async fn send_message(&self, target: u32, msg: RaftMessage) {
         let out = self.outbound.lock().await;
         if let Some(tx) = out.get(&target) {
-            if tx.send(msg).is_err() {
-                debug!("⚠️  Node {}: channel closed for peer {}", self.id, target);
-            }
+            let _ = tx.send(msg);
         } else {
-            debug!("⚠️  Node {}: no outbound for {}", self.id, target);
+            debug!("Node {}: no outbound for {}", self.id, target);
         }
     }
 
     async fn handle_message(&self, message: RaftMessage) {
         match message {
             RaftMessage::RequestVote { term, candidate_id, last_log_index, last_log_term } => {
-                info!("🗳️  Node {} received vote request from {} for term {}", self.id, candidate_id, term);
+                info!("Node {} received vote request from {} for term {}", self.id, candidate_id, term);
 
                 let log = self.log.read().await;
                 let our_last_index = log.len() as u64;
@@ -645,7 +617,7 @@ impl NetNode {
                 };
 
                 if !log_is_ok {
-                    info!("❌ Node {} rejecting vote for {} (log out of date)", self.id, candidate_id);
+                    info!("Node {} rejecting vote for {} (log out of date)", self.id, candidate_id);
                     let reply = RaftMessage::VoteReply {
                         term: *self.current_term.read().await,
                         vote_granted: false,
@@ -674,15 +646,14 @@ impl NetNode {
                 } else { false };
 
                 let reply = RaftMessage::VoteReply { term: *current_term, vote_granted: grant, sender_id: self.id };
-                info!("✅ Node {} {} vote for {} in term {}", self.id, if grant { "granted" } else { "denied" }, candidate_id, term);
                 self.send_message(candidate_id, reply).await;
             }
             RaftMessage::VoteReply { term, vote_granted, sender_id } => {
-                info!("📩 Node {} received vote reply from {} (granted: {})", self.id, sender_id, vote_granted);
+                info!("Node {} received vote reply from {} (granted: {})", self.id, sender_id, vote_granted);
                 self.handle_vote_reply(term, vote_granted, sender_id).await;
             }
             RaftMessage::AppendEntries { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit } => {
-                debug!("📨 Node {} received AppendEntries from {} (term {}, {} entries)",
+                info!("Node {} received AppendEntries from {} (term {}, {} entries)",
                       self.id, leader_id, term, entries.len());
 
                 {
@@ -694,7 +665,7 @@ impl NetNode {
                 let mut success = false;
 
                 if term < current_term {
-                    debug!("⚠️  Node {} rejecting AppendEntries (term {} < {})", self.id, term, current_term);
+                    info!("Node {} rejecting AppendEntries (term {} < {})", self.id, term, current_term);
                 } else {
                     if term > current_term {
                         *self.current_term.write().await = term;
@@ -716,7 +687,7 @@ impl NetNode {
                     };
 
                     if !log_ok {
-                        debug!("⚠️  Node {} log inconsistency at index {}", self.id, prev_log_index);
+                        info!("Node {} log inconsistency at index {}", self.id, prev_log_index);
                     } else {
                         if prev_log_index < log.len() as u64 {
                             log.truncate(prev_log_index as usize);
@@ -726,7 +697,7 @@ impl NetNode {
                         let mut commit_index = self.commit_index.write().await;
                         if leader_commit > *commit_index {
                             *commit_index = leader_commit.min(log.len() as u64);
-                            debug!("✅ Node {} updated commit_index to {}", self.id, *commit_index);
+                            info!("Node {} updated commit_index to {}", self.id, *commit_index);
                         }
                         drop(commit_index);
                         drop(log);
@@ -743,7 +714,7 @@ impl NetNode {
                 self.send_message(leader_id, reply).await;
             }
             RaftMessage::AppendReply { term, sender_id, success } => {
-                debug!("📩 Node {} received AppendReply from {} (success: {})", self.id, sender_id, success);
+                info!("Node {} received AppendReply from {} (success: {})", self.id, sender_id, success);
 
                 let current_term = *self.current_term.read().await;
                 if term > current_term {
@@ -757,12 +728,12 @@ impl NetNode {
                     if success {
                         let last_log_index = self.log.read().await.len() as u64;
                         self.update_indices(sender_id, last_log_index).await;
-                        debug!("✅ Node {} updated indices for {} to {}", self.id, sender_id, last_log_index);
+                        info!("Node {} updated indices for {} to {}", self.id, sender_id, last_log_index);
                     } else {
                         let mut next_indices = self.next_index.write().await;
                         if let Some(next_idx) = next_indices.get_mut(&sender_id) {
                             *next_idx = Self::clamp1(next_idx.saturating_sub(1));
-                            debug!("⬇️  Node {} decreased next_index for {} to {}", self.id, sender_id, *next_idx);
+                            info!("Node {} decreased next_index for {} to {}", self.id, sender_id, *next_idx);
                         }
                     }
                 }
@@ -777,7 +748,7 @@ impl NetNode {
                         .unwrap_or_default()
                         .as_millis();
                     t.insert(self.id, (my_pending, now_ms));
-                    debug!("📊 Leader {} updated load_table from {} => pending={}", self.id, from_id, pending);
+                    debug!("Leader {} updated load_table from {} => pending={}", self.id, from_id, pending);
                 }
             }
         }
@@ -797,11 +768,11 @@ impl NetNode {
             entry.insert(_sender_id, vote_granted);
             let granted_votes = entry.values().filter(|&&v| v).count();
             let total = self.peers.len() + 1;
-            info!("🗳️  Node {}: term {} has {} granted votes out of {}", self.id, term, granted_votes, total);
+            info!("Node {}: term {} has {} granted votes out of {}", self.id, term, granted_votes, total);
             if granted_votes > total / 2 && matches!(*self.state.read().await, RaftState::Candidate) {
                 *self.state.write().await = RaftState::Leader;
                 self.metrics.elections_won.fetch_add(1, Ordering::Relaxed);
-                info!("👑 Node {} became LEADER for term {}", self.id, current_term);
+                info!("Node {} became leader for term {}", self.id, current_term);
 
                 self.rebuild_state_from_log().await;
 
@@ -845,7 +816,7 @@ impl NetNode {
                         continue;
                     }
                     info!(
-                        "⏰ Node {} election timeout after {:?}, starting election",
+                        "Node {} election timeout after {:?}, starting election",
                         self.id, last.elapsed()
                     );
                 }
@@ -860,7 +831,7 @@ impl NetNode {
             *self.voted_for.write().await = Some(self.id);
             *self.last_heartbeat.write().await = Instant::now();
             let term = *self.current_term.read().await;
-            info!("🗳️  Node {} starting election for term {}", self.id, term);
+            info!("Node {} starting election for term {}", self.id, term);
 
             {
                 let mut votes = self.votes_received.write().await;
@@ -909,33 +880,27 @@ impl NetNode {
             let port = 9100 + delegate_id;
             let target_addr = format!("{}:{}", peer_host, port);
 
-            match tokio::time::timeout(
-                Duration::from_secs(3),
-                TcpStream::connect(&target_addr)
-            ).await {
-                Ok(Ok(mut stream)) => {
+            match TcpStream::connect(&target_addr).await {
+                Ok(mut stream) => {
                     if let Err(e) = stream.write_all(format!("{}\n", command).as_bytes()).await {
-                        error!("❌ Leader {} failed to send command to delegate {}: {:?}", self.id, delegate_id, e);
+                        error!("Leader {} failed to send command to delegate {}: {:?}", self.id, delegate_id, e);
                     } else {
-                        info!("🎯 Leader {} delegated '{}' to follower {} ({})", self.id, command, delegate_id, target_addr);
+                        info!("Leader {} delegated '{}' to follower {} ({})", self.id, command, delegate_id, target_addr);
                     }
                 }
-                Ok(Err(e)) => {
-                    error!("❌ Leader {} failed to connect to delegate {} at {}: {:?}", self.id, delegate_id, target_addr, e);
-                }
-                Err(_) => {
-                    error!("❌ Leader {} timeout connecting to delegate {} at {}", self.id, delegate_id, target_addr);
+                Err(e) => {
+                    error!("Leader {} failed to connect to delegate {} at {}: {:?}", self.id, delegate_id, target_addr, e);
                 }
             }
         } else {
-            error!("❌ Leader {}: delegate id {} not found in peers", self.id, delegate_id);
+            error!("Leader {}: delegate id {} not found in peers", self.id, delegate_id);
         }
     }
 
     async fn rebuild_state_from_log(&self) {
         let log = self.log.read().await;
         let commit_index = *self.commit_index.read().await;
-        info!("🔄 Node {} rebuilding state from {} committed entries", self.id, commit_index);
+        info!("Node {} rebuilding state from {} committed entries", self.id, commit_index);
 
         self.registered_users.write().await.clear();
 
@@ -959,7 +924,7 @@ impl NetNode {
                 }
             }
         }
-        info!("✅ Node {} rebuild complete: {} users restored",
+        info!("Node {} rebuild complete: {} users restored",
             self.id, self.registered_users.read().await.len());
     }
 
@@ -975,7 +940,7 @@ impl NetNode {
                         if let Some(delegate_id) = self.pick_delegate().await {
                             self.delegate_execute(delegate_id, &entry.command).await;
                         } else {
-                            debug!("⚠️  Node {}: no delegate available, executing locally", self.id);
+                            info!("Node {}: no delegate available, executing locally", self.id);
                             self.execute_locally(&entry.command).await;
                         }
                     }
@@ -986,9 +951,9 @@ impl NetNode {
                                 self.registered_users
                                     .write().await
                                     .insert(user.to_string(), ip.to_string());
-                                info!("✅ Node {}: Applied REGISTER {} {}", self.id, user, ip);
+                                info!("Node {}: Applied REGISTER {} {}", self.id, user, ip);
                             } else {
-                                warn!("⚠️  Node {}: Malformed REGISTER command '{}'", self.id, entry.command);
+                                info!("Node {}: Malformed REGISTER command '{}'", self.id, entry.command);
                             }
                         }
                         Some("UNREGISTER") => {
@@ -996,9 +961,9 @@ impl NetNode {
                                 self.registered_users
                                     .write().await
                                     .remove(user);
-                                info!("✅ Node {}: Applied UNREGISTER {}", self.id, user);
+                                info!("Node {}: Applied UNREGISTER {}", self.id, user);
                             } else {
-                                warn!("⚠️  Node {}: Malformed UNREGISTER command '{}'", self.id, entry.command);
+                                info!("Node {}: Malformed UNREGISTER command '{}'", self.id, entry.command);
                             }
                         }
                         Some("ENCRYPT_IMAGE") => {
@@ -1018,30 +983,30 @@ impl NetNode {
                                                     Ok((stego_bytes, sha, count)) => {
                                                         if let Some(parent) = Path::new(&output_path).parent() {
                                                             if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                                                                error!("❌ Node {}: create_dir_all {:?} failed: {:?}", self.id, parent, e);
+                                                                error!("Node {}: create_dir_all {:?} failed: {:?}", self.id, parent, e);
                                                                 continue;
                                                             }
                                                         }
                                                         // Skipping actual file save (as per your previous note)
                                                         info!(
-                                                            "✅ Node {}: ENCRYPT_IMAGE computed successfully ({} bytes embedded, sha256={}), skipping file save",
+                                                            "Node {}: ENCRYPT_IMAGE computed successfully ({} bytes embedded, sha256={}), skipping file save",
                                                             self.id, count, sha
                                                         );
                                                     }
-                                                    Err(e) => error!("❌ Node {}: encryption/embed failed: {:?}", self.id, e),
+                                                    Err(e) => error!("Node {}: encryption/embed failed: {:?}", self.id, e),
                                                 }
                                             }
-                                            Err(e) => error!("❌ Node {}: failed to read cover image {}: {:?}", self.id, cover_path, e),
+                                            Err(e) => error!("Node {}: failed to read cover image {}: {:?}", self.id, cover_path, e),
                                         }
                                     }
-                                    Err(e) => error!("❌ Node {}: failed to read {}: {:?}", self.id, input_path, e),
+                                    Err(e) => error!("Node {}: failed to read {}: {:?}", self.id, input_path, e),
                                 }
                             } else {
-                                error!("❌ Node {}: malformed ENCRYPT_IMAGE command '{}'", self.id, entry.command);
+                                error!("Node {}: malformed ENCRYPT_IMAGE command '{}'", self.id, entry.command);
                             }
                         }
                         Some(other) => {
-                            debug!("⚠️  Node {}: Unknown command '{}'", self.id, other);
+                            info!("Node {}: Unknown command '{}'", self.id, other);
                         }
                         None => {}
                     }
@@ -1051,6 +1016,7 @@ impl NetNode {
         }
     }
 
+    // ---- Local executor (increments task counters) ----
     async fn execute_locally(&self, cmd: &str) {
         self.metrics.tasks_executed_local.fetch_add(1, Ordering::Relaxed);
         let mut parts = cmd.split_whitespace();
@@ -1061,29 +1027,30 @@ impl NetNode {
                         .write()
                         .await
                         .insert(user.to_string(), ip.to_string());
-                    info!("✅ Node {} executed REGISTER {} {}", self.id, user, ip);
+                    info!("Node {} executed REGISTER {} {}", self.id, user, ip);
                 } else {
-                    error!("❌ Node {} malformed REGISTER in execute_locally: '{}'", self.id, cmd);
+                    error!("Node {} malformed REGISTER in execute_locally: '{}'", self.id, cmd);
                 }
             }
             Some("UNREGISTER") => {
                 if let Some(user) = parts.next() {
                     self.registered_users.write().await.remove(user);
-                    info!("✅ Node {} executed UNREGISTER {}", self.id, user);
+                    info!("Node {} executed UNREGISTER {}", self.id, user);
                 } else {
-                    error!("❌ Node {} malformed UNREGISTER in execute_locally: '{}'", self.id, cmd);
+                    error!("Node {} malformed UNREGISTER in execute_locally: '{}'", self.id, cmd);
                 }
             }
             Some("ENCRYPT_IMAGE") => {
                 let args: Vec<_> = parts.collect();
                 if args.len() == 4 {
                     let (_id, pass, inp, out) = (args[0], args[1], args[2], args[3]);
-                    info!("🔐 Node {} executing ENCRYPT_IMAGE {} -> {}", self.id, inp, out);
+                    info!("Node {} executing ENCRYPT_IMAGE {} -> {}", self.id, inp, out);
+                    // (logic handled in apply path above)
                 } else {
-                    error!("❌ Malformed ENCRYPT_IMAGE command: '{}'", cmd);
+                    error!("Malformed ENCRYPT_IMAGE command: '{}'", cmd);
                 }
             }
-            Some(other) => debug!("⚠️  Node {}: Unknown command '{}'", self.id, other),
+            Some(other) => info!("Node {}: Unknown command '{}'", self.id, other),
             None => {}
         }
     }
@@ -1159,7 +1126,7 @@ impl NetNode {
                 let mut commit_index = self.commit_index.write().await;
                 if majority_idx > *commit_index {
                     *commit_index = majority_idx;
-                    info!("🟢 Node {} advanced commit_index to {}", self.id, majority_idx);
+                    println!("🟢 Node {} advanced commit_index to {}", self.id, majority_idx);
                 }
             }
         }
@@ -1171,34 +1138,17 @@ impl NetNode {
 
         loop {
             let (stream, peer_addr) = listener.accept().await?;
-            
-            // Check connection limit
-            let current_conns = self.metrics.active_client_connections.load(Ordering::Relaxed);
-            if current_conns >= self.max_client_connections as u64 {
-                warn!("⚠️  Node {} rejecting connection from {} (limit reached: {})", 
-                    self.id, peer_addr, self.max_client_connections);
-                drop(stream);
-                continue;
-            }
-            
-            info!("📡 Node {} accepted client connection from {} ({}/{})", 
-                self.id, peer_addr, current_conns + 1, self.max_client_connections);
-            
-            self.metrics.active_client_connections.fetch_add(1, Ordering::Relaxed);
+            info!("📡 Node {} accepted client connection from {}", self.id, peer_addr);
             let node = self.clone();
-            
             tokio::spawn(async move {
                 if let Err(e) = node.handle_client_connection(stream).await {
-                    error!("❌ client connection error from {}: {:?}", peer_addr, e);
+                    error!("client connection error: {:?}", e);
                 }
-                node.metrics.active_client_connections.fetch_sub(1, Ordering::Relaxed);
-                info!("👋 Client {} disconnected", peer_addr);
             });
         }
     }
 
     async fn handle_client_connection(&self, mut stream: TcpStream) -> anyhow::Result<()> {
-        let peer_addr = stream.peer_addr()?;
         let (r, mut w) = stream.split();
         let mut reader = BufReader::new(r);
         let mut line = String::new();
@@ -1215,14 +1165,6 @@ impl NetNode {
 
             let start = self.metrics_request_start();
             let cmd = line.trim();
-            
-            if cmd.is_empty() {
-                self.metrics_ok(start);
-                continue;
-            }
-            
-            debug!("📨 Node {} from {}: {}", self.id, peer_addr, cmd);
-            
             let is_leader = matches!(*self.state.read().await, RaftState::Leader);
             let mut parts = cmd.split_whitespace();
 
@@ -1246,8 +1188,7 @@ impl NetNode {
                                 w.write_all(reply.as_bytes()).await?;
                                 self.metrics_ok(start);
                             }
-                            Err(e) => {
-                                error!("❌ Forward failed: {:?}", e);
+                            Err(_) => {
                                 if let Some(lid) = *self.leader_hint.read().await {
                                     let addr = self.client_addr_for(lid);
                                     w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
@@ -1290,8 +1231,7 @@ impl NetNode {
                                 w.write_all(reply.as_bytes()).await?;
                                 self.metrics_ok(start);
                             }
-                            Err(e) => {
-                                error!("❌ Forward failed: {:?}", e);
+                            Err(_) => {
                                 if let Some(lid) = *self.leader_hint.read().await {
                                     let addr = self.client_addr_for(lid);
                                     w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
@@ -1338,8 +1278,7 @@ impl NetNode {
                                 w.write_all(reply.as_bytes()).await?;
                                 self.metrics_ok(start);
                             }
-                            Err(e) => {
-                                error!("❌ Forward failed: {:?}", e);
+                            Err(_) => {
                                 if let Some(lid) = *self.leader_hint.read().await {
                                     let addr = self.client_addr_for(lid);
                                     w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
@@ -1446,7 +1385,7 @@ impl NetNode {
                 }
 
                 None => {
-                    // empty line; treat as no-op
+                    // empty line; treat as no-op, do not mark failure
                     self.metrics_ok(start);
                 }
             }
@@ -1456,7 +1395,7 @@ impl NetNode {
 
     async fn append_and_replicate(&self, command: String) {
         if !matches!(*self.state.read().await, RaftState::Leader) {
-            warn!("⚠️  Node {}: append ignored (not leader)", self.id);
+            info!("Node {}: append ignored (not leader)", self.id);
             return;
         }
 
@@ -1467,7 +1406,7 @@ impl NetNode {
             log.push(LogEntry { term, index, command: command.clone() });
             index
         };
-        info!("📝 Node {}: appended new entry #{} '{}'", self.id, index, command);
+        info!("Node {}: appended new entry #{} '{}'", self.id, index, command);
 
         let term_now = *self.current_term.read().await;
         let commit_index = *self.commit_index.read().await;
@@ -1515,19 +1454,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let listen: SocketAddr = args.addr.parse()?;
-    
-    println!("🚀 Starting Node {}", args.id);
-    println!("   Listen: {}", listen);
-    println!("   Client API: {}", args.client_addr);
-    println!("   Peers: {:?}", peers_map);
-    println!("   Max client connections: {}", args.max_client_connections);
-    
-    let node = Arc::new(NetNode::new(
-        args.id, 
-        peers_map, 
-        args.client_addr.clone(),
-        args.max_client_connections
-    ));
+    let node = Arc::new(NetNode::new(args.id, peers_map, args.client_addr.clone()));
     node.clone().start(listen).await?;
     loop { sleep(Duration::from_secs(3600)).await; }
 }

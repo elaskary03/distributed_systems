@@ -1,21 +1,50 @@
+// proxy.rs
+// use clap::{Parser, ValueEnum};
+// use rand::{distributions::Alphanumeric, Rng};
+// use std::{
+//     net::SocketAddr,
+//     str::FromStr,
+//     time::Duration,
+//     fs,
+//     path::Path,
+// };
+// use tokio::{
+//     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+//     net::{TcpListener, TcpStream},
+//     time::sleep,
+// };
+
+// use tokio::{
+//     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+//     net::{TcpStream, tcp::ReadHalf},
+//     time::{sleep, Duration},
+// };
+// use std::{fs, net::SocketAddr};
+// use anyhow::Result;
+// use rand::{Rng, distributions::Alphanumeric};
+
+use anyhow::Result;
+
 use clap::{Parser, ValueEnum};
+
 use rand::{distributions::Alphanumeric, Rng};
+
 use std::{
+    fs,
     net::SocketAddr,
+    path::Path,
     str::FromStr,
     time::Duration,
-    fs,
-    path::Path,
 };
+
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream},
-    time::sleep,
+    net::{TcpListener, TcpStream, tcp::ReadHalf},
+    time::{sleep},
 };
 
-use cloud_p2p_raft::crypto::{extract_payload, decrypt_bytes};
-use image::GenericImageView; // (not strictly needed, but fine to keep)
 
+use cloud_p2p_raft::crypto::{extract_payload, decrypt_bytes};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -29,7 +58,7 @@ struct Args {
     seeds: String,
 
     /// First attempt strategy
-    #[arg(long, value_enum, default_value_t = FirstTry::Broadcast)]
+    #[arg(long, value_enum, default_value_t = FirstTry::Sequential)]
     first_try: FirstTry,
 
     /// Max retries after failures/NOT_LEADER
@@ -61,10 +90,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen_addr).await?;
     println!("🔗 Proxy listening on {}", listen_addr);
     println!("   Using seeds: {:?}", seeds);
+    println!("   Strategy: {:?}", args.first_try);
+    println!("   Max retries: {}", args.max_retries);
 
     loop {
         let (stream, peer) = listener.accept().await?;
-        println!("📡 client connected: {}", peer);
+        println!("📡 Client connected: {}", peer);
 
         let seeds = seeds.clone();
         let cfg = ProxyCfg {
@@ -75,8 +106,9 @@ async fn main() -> anyhow::Result<()> {
 
         tokio::spawn(async move {
             if let Err(e) = handle_client(stream, seeds, cfg).await {
-                eprintln!("client handler error: {e:?}");
+                eprintln!("❌ Client handler error from {}: {e:?}", peer);
             }
+            println!("👋 Client {} disconnected", peer);
         });
     }
 }
@@ -88,13 +120,13 @@ struct ProxyCfg {
 }
 
 async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg) -> anyhow::Result<()> {
+    let peer_addr = stream.peer_addr()?;
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     let mut line = String::new();
 
-    // Present a simple banner (your proxy protocol)
     w.write_all(b"Welcome to Cloud P2P Proxy!\n").await?;
-    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
+    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | ENCRYPT_ON_CLOUD <image_id> <passphrase> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
 
     loop {
         line.clear();
@@ -107,12 +139,13 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
             continue;
         }
 
+        println!("📨 Client {}: {}", peer_addr, raw);
+
         let mut parts = raw.split_whitespace();
         let cmd = parts.next().unwrap_or_default();
 
         match cmd {
             "REGISTER" => {
-                // mutate with idempotent SUBMIT
                 let user = match parts.next() {
                     Some(x) => x,
                     None => { w.write_all(b"Usage: REGISTER <user> <ip>\n").await?; continue; }
@@ -124,6 +157,7 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
 
                 let op_id = next_op_id();
                 let payload = format!("SUBMIT {} REGISTER {} {}", op_id, user, ip);
+                println!("🚀 Submitting: {}", payload);
                 let resp = submit_idempotent(&seeds, &cfg, &payload).await;
                 write_line(&mut w, resp).await?;
             }
@@ -136,148 +170,184 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
 
                 let op_id = next_op_id();
                 let payload = format!("SUBMIT {} UNREGISTER {}", op_id, user);
+                println!("🚀 Submitting: {}", payload);
                 let resp = submit_idempotent(&seeds, &cfg, &payload).await;
                 write_line(&mut w, resp).await?;
             }
 
             "SHOW_USERS" => {
-                // read-only; ask any node until success, return raw (multi-line)
+                println!("📖 Querying SHOW_USERS");
                 match query_any(&seeds, "SHOW_USERS").await {
                     Ok(s) => w.write_all(s.as_bytes()).await?,
-                    Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
+                    Err(e) => {
+                        eprintln!("❌ SHOW_USERS failed: {}", e);
+                        w.write_all(format!("ERR {}\n", e).as_bytes()).await?;
+                    }
                 }
             }
 
             "LIST" => {
+                println!("📖 Querying LIST");
                 match query_any(&seeds, "LIST").await {
                     Ok(s) => w.write_all(s.as_bytes()).await?,
-                    Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
+                    Err(e) => {
+                        eprintln!("❌ LIST failed: {}", e);
+                        w.write_all(format!("ERR {}\n", e).as_bytes()).await?;
+                    }
                 }
             }
 
             "LEADER" => {
-                // Try to discover the leader by asking nodes
+                println!("🔍 Finding leader");
                 match find_leader(&seeds).await {
                     Ok(Some(line)) => w.write_all(line.as_bytes()).await?,
                     Ok(None) => w.write_all(b"NO_LEADER\n").await?,
-                    Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
+                    Err(e) => {
+                        eprintln!("❌ LEADER query failed: {}", e);
+                        w.write_all(format!("ERR {}\n", e).as_bytes()).await?;
+                    }
                 }
             }
 
             "ENCRYPT_IMAGE" => {
-            // Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
-            let id = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
-            let pass = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
-            let input_path = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
-            let output_path = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
+                let id = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+                };
+                let pass = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+                };
+                let input_path = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+                };
+                let output_path = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
+                };
 
-            let op_id = next_op_id();
-            let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}", op_id, id, pass, input_path, output_path);
-            let resp = submit_idempotent(&seeds, &cfg, &payload).await;
-            write_line(&mut w, resp).await?;
+                let op_id = next_op_id();
+                let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}", op_id, id, pass, input_path, output_path);
+                println!("🔐 Submitting encryption: {}", payload);
+                let resp = submit_idempotent(&seeds, &cfg, &payload).await;
+                write_line(&mut w, resp).await?;
             }
 
             "ENCRYPT_ON_CLOUD" => {
-            // Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>
-            let image_id = match parts.next() {
-                Some(x) if !x.is_empty() => x,
-                _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n").await?; continue; }
-            };
-            let pass = match parts.next() {
-                Some(x) => x,
-                _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n").await?; continue; }
-            };
+                let image_id = match parts.next() {
+                    Some(x) if !x.is_empty() => x,
+                    _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n").await?; continue; }
+                };
+                let pass = match parts.next() {
+                    Some(x) => x,
+                    _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n").await?; continue; }
+                };
 
-            // Find the uploaded file saved by the GUI (pattern: uploads/<image_id>-<original_name>)
-            let input_path = match find_upload_by_prefix("uploads", image_id) {
-                Ok(p) => p,
-                Err(e) => {
-                    w.write_all(format!("ERR input not found: {}\n", e).as_bytes()).await?;
+                // Validate image_id format
+                if !image_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                    w.write_all(b"ERR invalid image_id: use alphanumeric, dash, underscore only\n").await?;
                     continue;
                 }
-            };
 
-            // Output goes to stego/<image_id>.png (uniform & predictable)
-            let output_path = format!("stego/{}.png", image_id);
-            if let Some(parent) = Path::new(&output_path).parent() {
-                let _ = fs::create_dir_all(parent);
+                let input_path = match find_upload_by_prefix("uploads", image_id) {
+                    Ok(p) => {
+                        println!("📁 Found upload: {}", p);
+                        p
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Upload not found for '{}': {}", image_id, e);
+                        w.write_all(format!("ERR input not found: {}\n", e).as_bytes()).await?;
+                        continue;
+                    }
+                };
+
+                let output_path = format!("stego/{}.png", image_id);
+                if let Some(parent) = Path::new(&output_path).parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+
+                let op_id = next_op_id();
+                let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}",
+                    op_id, image_id, pass, input_path, output_path);
+
+                println!("🔐 Submitting cloud encryption for {}", image_id);
+                let resp = submit_idempotent(&seeds, &cfg, &payload).await;
+                write_line(&mut w, resp).await?;
             }
 
-            let op_id = next_op_id();
-            let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}",
-                op_id, image_id, pass, input_path, output_path);
+            "DECRYPT_IMAGE" => {
+                let pass = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
+                };
+                let stego_path = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
+                };
+                let output_path = match parts.next() {
+                    Some(x) => x,
+                    None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
+                };
 
-            let resp = submit_idempotent(&seeds, &cfg, &payload).await;
-            write_line(&mut w, resp).await?;
-        }
-        "DECRYPT_IMAGE" => {
-        // Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>
-        let pass = match parts.next() {
-            Some(x) => x,
-            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
-        };
-        let stego_path = match parts.next() {
-            Some(x) => x,
-            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
-        };
-        let output_path = match parts.next() {
-            Some(x) => x,
-            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
-        };
+                println!("🔓 Decrypting {} -> {}", stego_path, output_path);
 
-        // Read the stego PNG
-        let bytes = match fs::read(stego_path) {
-            Ok(b) => b,
-            Err(e) => { w.write_all(format!("ERR read stego: {e}\n").as_bytes()).await?; continue; }
-        };
+                let bytes = match fs::read(stego_path) {
+                    Ok(b) => b,
+                    Err(e) => { 
+                        eprintln!("❌ Read stego failed: {}", e);
+                        w.write_all(format!("ERR read stego: {e}\n").as_bytes()).await?; 
+                        continue; 
+                    }
+                };
 
-        // Decode image -> RGBA
-        let img = match image::load_from_memory(&bytes) {
-            Ok(i) => i.to_rgba8(),
-            Err(e) => { w.write_all(format!("ERR decode stego PNG: {e}\n").as_bytes()).await?; continue; }
-        };
+                let img = match image::load_from_memory(&bytes) {
+                    Ok(i) => i.to_rgba8(),
+                    Err(e) => { 
+                        eprintln!("❌ Decode PNG failed: {}", e);
+                        w.write_all(format!("ERR decode stego PNG: {e}\n").as_bytes()).await?; 
+                        continue; 
+                    }
+                };
 
-        // Extract payload (nonce + ciphertext)
-        let (nonce, ciphertext) = match extract_payload(&img) {
-            Ok(t) => t,
-            Err(e) => { w.write_all(format!("ERR extract payload: {e}\n").as_bytes()).await?; continue; }
-        };
+                let (nonce, ciphertext) = match extract_payload(&img) {
+                    Ok(t) => t,
+                    Err(e) => { 
+                        eprintln!("❌ Extract payload failed: {}", e);
+                        w.write_all(format!("ERR extract payload: {e}\n").as_bytes()).await?; 
+                        continue; 
+                    }
+                };
 
-        // Decrypt
-        let plaintext = match decrypt_bytes(pass.as_bytes(), &nonce, &ciphertext) {
-            Ok(p) => p,
-            Err(e) => { w.write_all(format!("ERR decrypt embedded ciphertext: {e}\n").as_bytes()).await?; continue; }
-        };
+                let plaintext = match decrypt_bytes(pass.as_bytes(), &nonce, &ciphertext) {
+                    Ok(p) => p,
+                    Err(e) => { 
+                        eprintln!("❌ Decrypt failed: {}", e);
+                        w.write_all(format!("ERR decrypt embedded ciphertext: {e}\n").as_bytes()).await?; 
+                        continue; 
+                    }
+                };
 
-        // Ensure output dir exists
-        if let Some(parent) = Path::new(output_path).parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                w.write_all(format!("ERR create_dir_all {:?}: {e}\n", parent).as_bytes()).await?;
-                continue;
+                if let Some(parent) = Path::new(output_path).parent() {
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        eprintln!("❌ Create dir failed: {}", e);
+                        w.write_all(format!("ERR create_dir_all {:?}: {e}\n", parent).as_bytes()).await?;
+                        continue;
+                    }
+                }
+
+                if let Err(e) = fs::write(output_path, &plaintext) {
+                    eprintln!("❌ Write output failed: {}", e);
+                    w.write_all(format!("ERR write output: {e}\n").as_bytes()).await?;
+                    continue;
+                }
+
+                println!("✅ Decryption successful: {}", output_path);
+                w.write_all(b"OK\n").await?;
             }
-        }
 
-        // Write recovered bytes
-        if let Err(e) = fs::write(output_path, &plaintext) {
-            w.write_all(format!("ERR write output: {e}\n").as_bytes()).await?;
-            continue;
-        }
-
-        w.write_all(b"OK\n").await?;
-    }
             _ => {
+                eprintln!("❌ Unknown command: {}", cmd);
                 w.write_all(format!("ERR unknown command: {}\n", cmd).as_bytes()).await?;
             }
         }
@@ -292,10 +362,10 @@ async fn write_line(
  ) -> anyhow::Result<()> {
     match resp {
         Ok(s) => {
-            // We expect single-line like "OK\n" or "REDIRECT ...\n"
             w.write_all(s.as_bytes()).await?;
         }
         Err(e) => {
+            eprintln!("❌ Request failed: {}", e);
             w.write_all(format!("ERR {}\n", e).as_bytes()).await?;
         }
     }
@@ -305,33 +375,46 @@ async fn write_line(
 /* ============================
    Core forwarding helpers
    ============================ */
+// use tokio::{
+//     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+//     net::{TcpStream, tcp::ReadHalf},
+//     time::{sleep, Duration},
+// };
+// use std::{fs, net::SocketAddr};
+// use anyhow::Result;
+// use rand::{Rng, distributions::Alphanumeric};
 
-/// End-to-end idempotent submit with initial try + redirect + retries + backoff.
 async fn submit_idempotent(
     seeds: &[SocketAddr],
     cfg: &ProxyCfg,
     cmd_line: &str,
-) -> Result<String, anyhow::Error> {
-    // initial attempt
-    let mut last_err: Option<anyhow::Error> = None;
+) -> Result<String> {
+    let mut errors = Vec::new();
 
-    match cfg.first_try {
+    let is_write = cmd_line.contains("SUBMIT");
+    let strategy = if is_write {
+        FirstTry::Sequential
+    } else {
+        cfg.first_try
+    };
+
+    match strategy {
         FirstTry::Broadcast => {
-            // fire concurrently; first OK wins
             let mut tasks = Vec::new();
             for &addr in seeds {
                 let line = cmd_line.to_string();
                 tasks.push(tokio::spawn(async move { talk_once(addr, &line).await }));
             }
             for t in tasks {
-                match t.await? {
-                    Ok(Resp::Ok(s)) => return Ok(s),
-                    Ok(Resp::Redirect(to)) => {
-                        if let Ok(s) = send_once(&to, cmd_line).await { return Ok(s); }
+                match t.await?? {
+                    Resp::Ok(s) => return Ok(s),
+                    Resp::Redirect(to) => {
+                        if let Ok(s) = send_once(&to, cmd_line).await {
+                            return Ok(s);
+                        }
                     }
-                    Ok(Resp::NotLeader) => { /* wait for any OK from others */ }
-                    Ok(Resp::Other(s)) => return Ok(s),
-                    Err(e) => last_err = Some(e.into()),
+                    Resp::NotLeader => {}
+                    Resp::Other(s) => return Ok(s),
                 }
             }
         }
@@ -340,49 +423,65 @@ async fn submit_idempotent(
                 match talk_once(addr, cmd_line).await {
                     Ok(Resp::Ok(s)) => return Ok(s),
                     Ok(Resp::Redirect(to)) => {
-                        if let Ok(s) = send_once(&to, cmd_line).await { return Ok(s); }
+                        if let Ok(s) = send_once(&to, cmd_line).await {
+                            return Ok(s);
+                        }
                     }
-                    Ok(Resp::NotLeader) => { /* try next */ }
+                    Ok(Resp::NotLeader) => {}
                     Ok(Resp::Other(s)) => return Ok(s),
-                    Err(e) => last_err = Some(e.into()),
+                    Err(e) => errors.push(format!("{}: {}", addr, e)),
                 }
             }
         }
     }
 
-    // retries with backoff (handles leader failover)
     let mut backoff = Duration::from_millis(cfg.backoff_ms);
-    for _ in 0..cfg.max_retries {
+
+    for retry in 0..cfg.max_retries {
         for &addr in seeds {
             match talk_once(addr, cmd_line).await {
                 Ok(Resp::Ok(s)) => return Ok(s),
                 Ok(Resp::Redirect(to)) => {
-                    if let Ok(s) = send_once(&to, cmd_line).await { return Ok(s); }
+                    if let Ok(s) = send_once(&to, cmd_line).await {
+                        return Ok(s);
+                    }
                 }
                 Ok(Resp::NotLeader) => {}
                 Ok(Resp::Other(s)) => return Ok(s),
-                Err(e) => last_err = Some(e.into()),
+                Err(e) => errors.push(format!("{}: {}", addr, e)),
             }
         }
+
         let jitter = rand::thread_rng().gen_range(0..(backoff.as_millis() as u64 / 3 + 1));
-        sleep(backoff + Duration::from_millis(jitter)).await;
+        let sleep_duration = backoff + Duration::from_millis(jitter);
+        sleep(sleep_duration).await;
+
         backoff = std::cmp::min(backoff * 2, Duration::from_secs(2));
     }
 
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("submit failed")))
+    Err(anyhow::anyhow!("All attempts failed: {}", errors.join("; ")))
 }
 
-/// Send a one-off command to a specific node and parse the first line.
-async fn talk_once(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<Resp> {
-    let mut s = TcpStream::connect(addr).await?;
-    let (r, mut w) = s.split();
-    let mut reader = BufReader::new(r);
+async fn talk_once(addr: SocketAddr, cmd_line: &str) -> Result<Resp> {
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect(addr)
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("connection timeout"))??;
 
-    // read 2-line banner from node
-    let mut tmp = String::new();
-    reader.read_line(&mut tmp).await?;
-    tmp.clear();
-    reader.read_line(&mut tmp).await?;
+    // Banner read BEFORE split
+    {
+        let mut banner_reader = BufReader::new(&mut stream);
+        let mut tmp = String::new();
+        tokio::time::timeout(Duration::from_secs(2), banner_reader.read_line(&mut tmp)).await??;
+        tmp.clear();
+        tokio::time::timeout(Duration::from_secs(2), banner_reader.read_line(&mut tmp)).await??;
+    }
+
+    // Now split
+    let (r, mut w) = stream.split();
+    let mut reader = BufReader::new(r);
 
     w.write_all(cmd_line.as_bytes()).await?;
     w.write_all(b"\n").await?;
@@ -390,24 +489,30 @@ async fn talk_once(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<Resp> {
     parse_first_line(&mut reader).await
 }
 
-/// If redirected, reconnect to that address and resend once.
-async fn send_once(to: &str, cmd_line: &str) -> anyhow::Result<String> {
-    let addr: SocketAddr = to.parse()?;
-    let mut s = TcpStream::connect(addr).await?;
-    let (r, mut w) = s.split();
-    let mut reader = BufReader::new(r);
+async fn send_once(to: &str, cmd_line: &str) -> Result<String> {
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect(to.parse::<SocketAddr>()?)
+    )
+    .await??;
 
-    // banner
-    let mut tmp = String::new();
-    reader.read_line(&mut tmp).await?;
-    tmp.clear();
-    reader.read_line(&mut tmp).await?;
+    // Banner
+    {
+        let mut banner_reader = BufReader::new(&mut stream);
+        let mut tmp = String::new();
+        tokio::time::timeout(Duration::from_secs(2), banner_reader.read_line(&mut tmp)).await??;
+        tmp.clear();
+        tokio::time::timeout(Duration::from_secs(2), banner_reader.read_line(&mut tmp)).await??;
+    }
+
+    let (r, mut w) = stream.split();
+    let mut reader = BufReader::new(r);
 
     w.write_all(cmd_line.as_bytes()).await?;
     w.write_all(b"\n").await?;
 
     let mut resp = String::new();
-    reader.read_line(&mut resp).await?;
+    tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut resp)).await??;
     Ok(resp)
 }
 
@@ -418,11 +523,13 @@ enum Resp {
     Other(String),
 }
 
-async fn parse_first_line(reader: &mut BufReader<tokio::net::tcp::ReadHalf<'_>>) -> anyhow::Result<Resp> {
+async fn parse_first_line(
+    reader: &mut BufReader<ReadHalf<'_>>
+) -> Result<Resp> {
     let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    let trimmed = line.trim_end();
+    tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut line)).await??;
 
+    let trimmed = line.trim_end();
     if trimmed == "OK" {
         return Ok(Resp::Ok(line));
     }
@@ -432,62 +539,94 @@ async fn parse_first_line(reader: &mut BufReader<tokio::net::tcp::ReadHalf<'_>>)
     if let Some(rest) = trimmed.strip_prefix("REDIRECT ") {
         return Ok(Resp::Redirect(rest.to_string()));
     }
-    Ok(Resp::Other(line)) // For LIST/SHOW_USERS we may get multi-line; caller will handle.
+    Ok(Resp::Other(line))
 }
 
-/// Read-only helper: try each seed until one returns something.
-/// This reads *until EOF or socket close*, which works with your current node's single-line loop output.
-async fn query_any(seeds: &[SocketAddr], cmd_line: &str) -> anyhow::Result<String> {
-    let mut last_err: Option<anyhow::Error> = None;
-
+async fn query_any(seeds: &[SocketAddr], cmd_line: &str) -> Result<String> {
+    let mut errors = Vec::new();
     for &addr in seeds {
-        if let Ok(s) = read_multiline(addr, cmd_line).await {
-            return Ok(s);
+        match read_multiline(addr, cmd_line).await {
+            Ok(s) => return Ok(s),
+            Err(e) => errors.push(format!("{}: {}", addr, e)),
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no node responded")))
+    Err(anyhow::anyhow!("No node responded: {}", errors.join("; ")))
 }
 
-async fn read_multiline(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<String> {
-    let mut s = TcpStream::connect(addr).await?;
-    let (r, mut w) = s.split();
-    let mut reader = BufReader::new(r);
+async fn read_multiline(addr: SocketAddr, cmd_line: &str) -> Result<String> {
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect(addr)
+    )
+    .await??;
 
-    // banner
-    let mut tmp = String::new();
-    reader.read_line(&mut tmp).await?;
-    tmp.clear();
-    reader.read_line(&mut tmp).await?;
+    // Banner
+    {
+        let mut banner_reader = BufReader::new(&mut stream);
+        let mut tmp = String::new();
+        tokio::time::timeout(Duration::from_secs(2), banner_reader.read_line(&mut tmp)).await??;
+        tmp.clear();
+        tokio::time::timeout(Duration::from_secs(2), banner_reader.read_line(&mut tmp)).await??;
+    }
+
+    let (r, mut w) = stream.split();
+    let mut reader = BufReader::new(r);
 
     w.write_all(cmd_line.as_bytes()).await?;
     w.write_all(b"\n").await?;
 
+    let base_timeout_ms: u64 = if cmd_line.contains("ENCRYPT_IMAGE") {
+        10000
+    } else if cmd_line == "LEADER" {
+        500
+    } else {
+        2000
+    };
+
     let mut out = String::new();
+    let start = tokio::time::Instant::now();
+
     loop {
         let mut buf = String::new();
+
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let remaining_ms = base_timeout_ms.saturating_sub(elapsed_ms);
+        if remaining_ms == 0 {
+            break;
+        }
+
         tokio::select! {
-            n = reader.read_line(&mut buf) => {
-                let n = n?;
+            result = reader.read_line(&mut buf) => {
+                let n = result?;
                 if n == 0 { break; }
                 out.push_str(&buf);
-                // Only LEADER is guaranteed single-line; keep it snappy.
-                if cmd_line == "LEADER" {
+
+                let trimmed = buf.trim();
+                if trimmed == "OK"
+                    || trimmed.starts_with("ERR")
+                    || trimmed.starts_with("REDIRECT")
+                    || trimmed == "NOT_LEADER"
+                    || trimmed == "(empty)"
+                {
+                    break;
+                }
+
+                if cmd_line == "LEADER" && !out.is_empty() {
                     break;
                 }
             }
-            _ = sleep(Duration::from_millis(100)) => {
-                // brief idle; assume node finished writing
-                break;
-            }
+            _ = sleep(Duration::from_millis(remaining_ms)) => break,
         }
     }
+
     if out.is_empty() {
-        anyhow::bail!("empty reply");
+        anyhow::bail!("empty reply from {}", addr);
     }
+
     Ok(out)
 }
 
-async fn find_leader(seeds: &[SocketAddr]) -> anyhow::Result<Option<String>> {
+async fn find_leader(seeds: &[SocketAddr]) -> Result<Option<String>> {
     for &addr in seeds {
         if let Ok(line) = read_one_line(addr, "LEADER").await {
             if line.starts_with("LEADER ") {
@@ -498,28 +637,31 @@ async fn find_leader(seeds: &[SocketAddr]) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
-async fn read_one_line(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<String> {
-    let mut s = TcpStream::connect(addr).await?;
-    let (r, mut w) = s.split();
-    let mut reader = BufReader::new(r);
+async fn read_one_line(addr: SocketAddr, cmd_line: &str) -> Result<String> {
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(3),
+        TcpStream::connect(addr)
+    )
+    .await??;
 
-    // banner
-    let mut tmp = String::new();
-    reader.read_line(&mut tmp).await?;
-    tmp.clear();
-    reader.read_line(&mut tmp).await?;
+    {
+        let mut banner_reader = BufReader::new(&mut stream);
+        let mut tmp = String::new();
+        tokio::time::timeout(Duration::from_secs(2), banner_reader.read_line(&mut tmp)).await??;
+        tmp.clear();
+        tokio::time::timeout(Duration::from_secs(2), banner_reader.read_line(&mut tmp)).await??;
+    }
+
+    let (r, mut w) = stream.split();
+    let mut reader = BufReader::new(r);
 
     w.write_all(cmd_line.as_bytes()).await?;
     w.write_all(b"\n").await?;
 
     let mut resp = String::new();
-    reader.read_line(&mut resp).await?;
+    tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut resp)).await??;
     Ok(resp)
 }
-
-/* ================
-   util
-   ================ */
 
 fn next_op_id() -> String {
     let rand4: String = rand::thread_rng()
@@ -538,17 +680,13 @@ fn now_nanos() -> u128 {
         .as_nanos()
 }
 
-fn find_upload_by_prefix(dir: &str, image_id_prefix: &str) -> anyhow::Result<String> {
-    let mut chosen: Option<String> = None;
+fn find_upload_by_prefix(dir: &str, image_id_prefix: &str) -> Result<String> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
-        // GUI saves as "<image_id>-<sanitized-filename>"
         if name.starts_with(&format!("{}-", image_id_prefix)) {
-            let p = entry.path().to_string_lossy().to_string();
-            chosen = Some(p);
-            break;
+            return Ok(entry.path().to_string_lossy().to_string());
         }
     }
-    chosen.ok_or_else(|| anyhow::anyhow!("no file starting with '{}-'", image_id_prefix))
+    Err(anyhow::anyhow!("no file starting with '{}-'", image_id_prefix))
 }
