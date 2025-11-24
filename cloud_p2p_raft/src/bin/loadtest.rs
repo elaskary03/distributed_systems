@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::time::sleep;
 
 #[derive(Parser, Debug)]
@@ -34,7 +35,7 @@ struct Args {
     #[arg(long)]
     keep_alive: bool,
 
-    /// Ramp-up time (seconds)
+    /// Ramp-up time (seconds) - gradually increase clients
     #[arg(long, default_value = "0")]
     ramp_up_secs: u64,
 }
@@ -104,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
     let start_time = Instant::now();
     let mut tasks = Vec::new();
 
+    // Calculate delay between spawning clients for ramp-up
     let spawn_delay_ms = if args.ramp_up_secs > 0 && args.clients > 1 {
         (args.ramp_up_secs * 1000) / (args.clients as u64 - 1)
     } else {
@@ -118,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
         let delay_ms = args.delay_ms;
         let keep_alive = args.keep_alive;
 
+        // Ramp-up delay
         if spawn_delay_ms > 0 {
             sleep(Duration::from_millis(spawn_delay_ms)).await;
         }
@@ -140,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
 
         tasks.push(task);
 
+        // Print progress every 10 clients
         if (client_id + 1) % 10 == 0 {
             println!("📊 Spawned {}/{} clients...", client_id + 1, args.clients);
         }
@@ -147,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("⏳ Waiting for all clients to complete...\n");
 
+    // Progress reporter
     let stats_clone = stats.clone();
     let total_expected = (args.clients * args.requests) as u64;
     let reporter = tokio::spawn(async move {
@@ -155,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
             let completed = stats_clone.total_requests.load(Ordering::Relaxed);
             let success = stats_clone.successful.load(Ordering::Relaxed);
             let failed = stats_clone.failed.load(Ordering::Relaxed);
-
+            
             println!(
                 "📈 Progress: {}/{} ({:.1}%) | Success: {} | Failed: {}",
                 completed,
@@ -171,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Wait for all clients to finish
     for task in tasks {
         let _ = task.await;
     }
@@ -195,17 +201,33 @@ async fn run_client(
     stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
     if keep_alive {
-        let mut stream = connect_to_proxy(proxy).await?;
+        // Single persistent connection - robust implementation using owned halves
+        match connect_to_proxy_keepalive(proxy).await {
+            Ok((mut reader, mut writer)) => {
+                println!("🔗 Client {} established persistent connection", client_id);
 
-        for req_id in 0..requests {
-            let cmd = generate_command(mode, client_id, req_id);
-            execute_request(&mut stream, &cmd, stats.clone()).await;
+                for req_id in 0..requests {
+                    let cmd = generate_command(mode, client_id, req_id);
+                    execute_request_keepalive(&mut reader, &mut writer, &cmd, stats.clone()).await;
 
-            if delay_ms > 0 {
-                sleep(Duration::from_millis(delay_ms)).await;
+                    if delay_ms > 0 {
+                        sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                }
+
+                println!("✅ Client {} completed {} requests", client_id, requests);
+            }
+            Err(e) => {
+                eprintln!("❌ Client {} initial connection failed: {}", client_id, e);
+                // mark all requests as failed
+                for _ in 0..requests {
+                    stats.failed.fetch_add(1, Ordering::Relaxed);
+                    stats.total_requests.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     } else {
+        // New connection per request
         for req_id in 0..requests {
             let mut stream = match connect_to_proxy(proxy).await {
                 Ok(s) => s,
@@ -216,10 +238,10 @@ async fn run_client(
                     continue;
                 }
             };
-
+            
             let cmd = generate_command(mode, client_id, req_id);
             execute_request(&mut stream, &cmd, stats.clone()).await;
-
+            
             if delay_ms > 0 {
                 sleep(Duration::from_millis(delay_ms)).await;
             }
@@ -229,9 +251,6 @@ async fn run_client(
     Ok(())
 }
 
-//
-// FIXED VERSION — clean connect, banner read only once
-//
 async fn connect_to_proxy(proxy: &str) -> anyhow::Result<TcpStream> {
     let mut stream = tokio::time::timeout(
         Duration::from_secs(5),
@@ -250,29 +269,119 @@ async fn connect_to_proxy(proxy: &str) -> anyhow::Result<TcpStream> {
     Ok(stream)
 }
 
-//
-// FIXED VERSION — no split() at all
-//
-async fn execute_request(stream: &mut TcpStream, cmd: &str, stats: Arc<Stats>) {
+/// Connect and return owned read/write halves for keepalive usage.
+/// We read the banner before splitting to avoid losing banner data.
+async fn connect_to_proxy_keepalive(proxy: &str) -> anyhow::Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf)> {
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect(proxy),
+    )
+    .await??;
+
+    // Read banner lines from &mut stream before splitting
+    {
+        let mut banner_reader = BufReader::new(&mut stream);
+        let mut tmp = String::new();
+        tokio::time::timeout(Duration::from_secs(2), banner_reader.read_line(&mut tmp)).await??;
+        tmp.clear();
+        tokio::time::timeout(Duration::from_secs(2), banner_reader.read_line(&mut tmp)).await??;
+    }
+
+    // Split into owned halves and return a BufReader for the read half
+    let (r, w) = stream.into_split();
+    Ok((BufReader::new(r), w))
+}
+
+async fn execute_request_keepalive(
+    reader: &mut BufReader<OwnedReadHalf>,
+    writer: &mut OwnedWriteHalf,
+    cmd: &str,
+    stats: Arc<Stats>,
+) {
     let start = Instant::now();
     stats.total_requests.fetch_add(1, Ordering::Relaxed);
 
     // Send command
-    if let Err(e) = stream.write_all(cmd.as_bytes()).await {
+    if let Err(e) = writer.write_all(cmd.as_bytes()).await {
         eprintln!("❌ Write failed: {}", e);
         stats.failed.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    if let Err(e) = stream.write_all(b"\n").await {
-        eprintln!("❌ Newline write failed: {}", e);
+    if let Err(e) = writer.write_all(b"\n").await {
+        eprintln!("❌ Write newline failed: {}", e);
+        stats.failed.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if let Err(e) = writer.flush().await {
+        eprintln!("❌ Flush failed: {}", e);
         stats.failed.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
-    // Read response
-    let mut reader = BufReader::new(stream);
+    // Read response with timeout
     let mut response = String::new();
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        reader.read_line(&mut response)
+    )
+    .await
+    {
+        Ok(Ok(n)) if n > 0 => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            stats.latency_sum_ms.fetch_add(latency_ms, Ordering::Relaxed);
 
+            let trimmed = response.trim();
+            if trimmed == "OK" {
+                stats.successful.fetch_add(1, Ordering::Relaxed);
+            } else if trimmed.starts_with("REDIRECT") {
+                stats.redirects.fetch_add(1, Ordering::Relaxed);
+                stats.successful.fetch_add(1, Ordering::Relaxed);
+            } else if trimmed.starts_with("ERR") {
+                eprintln!("⚠️  Command '{}' returned: {}", cmd.trim(), trimmed);
+                stats.failed.fetch_add(1, Ordering::Relaxed);
+            } else {
+                // Other responses (LEADER, user list, etc.)
+                stats.successful.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Ok(Ok(_)) => {
+            eprintln!("⚠️  Empty response for: {}", cmd.trim());
+            stats.failed.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(Err(e)) => {
+            eprintln!("❌ Read error: {}", e);
+            stats.failed.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(_) => {
+            eprintln!("⏱️  Timeout for: {}", cmd.trim());
+            stats.timeouts.fetch_add(1, Ordering::Relaxed);
+            stats.failed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+async fn execute_request(stream: &mut TcpStream, cmd: &str, stats: Arc<Stats>) {
+    let start = Instant::now();
+    stats.total_requests.fetch_add(1, Ordering::Relaxed);
+
+    // For non-keepalive path we can use a temporary split (per-connection)
+    let (r, mut w) = stream.split();
+    let mut reader = BufReader::new(r);
+
+    // Send command
+    if let Err(e) = w.write_all(cmd.as_bytes()).await {
+        eprintln!("❌ Write failed: {}", e);
+        stats.failed.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if let Err(e) = w.write_all(b"\n").await {
+        eprintln!("❌ Write newline failed: {}", e);
+        stats.failed.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    // Read response with timeout
+    let mut response = String::new();
     match tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut response)).await {
         Ok(Ok(n)) if n > 0 => {
             let latency_ms = start.elapsed().as_millis() as u64;
@@ -285,14 +394,14 @@ async fn execute_request(stream: &mut TcpStream, cmd: &str, stats: Arc<Stats>) {
                 stats.redirects.fetch_add(1, Ordering::Relaxed);
                 stats.successful.fetch_add(1, Ordering::Relaxed);
             } else if trimmed.starts_with("ERR") {
-                eprintln!("⚠️ '{}' returned: {}", cmd.trim(), trimmed);
+                eprintln!("⚠️  Command '{}' returned: {}", cmd.trim(), trimmed);
                 stats.failed.fetch_add(1, Ordering::Relaxed);
             } else {
                 stats.successful.fetch_add(1, Ordering::Relaxed);
             }
         }
         Ok(Ok(_)) => {
-            eprintln!("⚠️ Empty response for: {}", cmd.trim());
+            eprintln!("⚠️  Empty response for: {}", cmd.trim());
             stats.failed.fetch_add(1, Ordering::Relaxed);
         }
         Ok(Err(e)) => {
@@ -300,7 +409,7 @@ async fn execute_request(stream: &mut TcpStream, cmd: &str, stats: Arc<Stats>) {
             stats.failed.fetch_add(1, Ordering::Relaxed);
         }
         Err(_) => {
-            eprintln!("⏱️ Timeout for: {}", cmd.trim());
+            eprintln!("⏱️  Timeout for: {}", cmd.trim());
             stats.timeouts.fetch_add(1, Ordering::Relaxed);
             stats.failed.fetch_add(1, Ordering::Relaxed);
         }
