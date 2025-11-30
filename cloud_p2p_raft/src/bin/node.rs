@@ -14,6 +14,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
 use std::path::Path;
 
+const MAX_LEADER_DURATION: Duration = Duration::from_secs(30);
+const LEADER_COOLDOWN: Duration = Duration::from_secs(15);
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -115,6 +118,10 @@ struct NetNode {
     registered_users: Arc<RwLock<HashMap<String, String>>>,
     // Idempotency for broadcasted client requests
     processed_ops: Arc<RwLock<std::collections::HashSet<String>>>,
+    // Track when we became leader to enforce a max leadership duration
+    leader_since: Arc<RwLock<Option<Instant>>>,
+    // Prevent a just-demoted leader from immediately winning again
+    leader_cooldown_until: Arc<RwLock<Option<Instant>>>,
 
 }
 
@@ -148,7 +155,13 @@ impl NetNode {
             leader_hint: Arc::new(RwLock::new(None)),
             registered_users: Arc::new(RwLock::new(HashMap::new())),
             processed_ops: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            leader_since: Arc::new(RwLock::new(None)),
+            leader_cooldown_until: Arc::new(RwLock::new(None)),
         }
+    }
+
+    async fn connected_peer_count(&self) -> usize {
+        self.outbound.lock().await.len()
     }
 
     #[inline]
@@ -383,6 +396,10 @@ impl NetNode {
         let hnode = self.clone();
         tokio::spawn(async move { hnode.heartbeat_loop().await });
 
+        // Leader rotation loop: current leader voluntarily steps down after a lease period
+        let rotation_node = self.clone();
+        tokio::spawn(async move { rotation_node.leader_rotation_loop().await });
+
         // Apply-committer: runs on ALL nodes (leaders & followers)
         let applier = self.clone();
         tokio::spawn(async move {
@@ -492,6 +509,7 @@ impl NetNode {
                     *current_term = term;
                     *voted_for = None;
                     *self.state.write().await = RaftState::Follower;
+                    *self.leader_since.write().await = None;
                 }
                 let grant = if term == *current_term {
                     match *voted_for {
@@ -532,6 +550,7 @@ impl NetNode {
                         *self.current_term.write().await = term;
                         *self.state.write().await = RaftState::Follower;
                         *self.voted_for.write().await = None;
+                        *self.leader_since.write().await = None;
                     }
                     
                     // Reset heartbeat timer
@@ -588,6 +607,7 @@ impl NetNode {
                     *self.current_term.write().await = term;
                     *self.state.write().await = RaftState::Follower;
                     *self.voted_for.write().await = None;
+                    *self.leader_since.write().await = None;
                     return;
                 }
                 
@@ -626,11 +646,13 @@ impl NetNode {
             entry.insert(_sender_id, vote_granted);
             // count granted votes
             let granted_votes = entry.values().filter(|&&v| v).count();
-            let total = self.peers.len() + 1;
+            let total = std::cmp::max(1, 1 + self.connected_peer_count().await);
             info!("Node {}: term {} has {} granted votes out of {}", self.id, term, granted_votes, total);
         if granted_votes > total / 2 && matches!(*self.state.read().await, RaftState::Candidate) {
             *self.state.write().await = RaftState::Leader;
             info!("Node {} became leader for term {}", self.id, current_term);
+            *self.leader_since.write().await = Some(Instant::now());
+            *self.leader_cooldown_until.write().await = None;
 
             self.rebuild_state_from_log().await;
 
@@ -672,6 +694,12 @@ impl NetNode {
                 continue;
             }
             RaftState::Candidate | RaftState::Follower => {
+                if let Some(until) = *self.leader_cooldown_until.read().await {
+                    if Instant::now() < until {
+                        sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+                }
                 let last = *self.last_heartbeat.read().await;
                 if last.elapsed() < timeout {
                     sleep(Duration::from_millis(100)).await;
@@ -691,6 +719,7 @@ impl NetNode {
         *self.state.write().await = RaftState::Candidate;
         *self.current_term.write().await += 1;
         *self.voted_for.write().await = Some(self.id);
+        *self.leader_since.write().await = None;
         *self.last_heartbeat.write().await = Instant::now();
         let term = *self.current_term.read().await;
         info!("Node {} starting election for term {}", self.id, term);
@@ -715,6 +744,28 @@ impl NetNode {
             last_log_index,
             last_log_term,
         };
+
+        // If we're isolated (no connected peers), self-elect so we keep making progress
+        if self.connected_peer_count().await == 0 {
+            *self.state.write().await = RaftState::Leader;
+            *self.leader_since.write().await = Some(Instant::now());
+            *self.leader_cooldown_until.write().await = None;
+            info!("Node {} self-electing as leader (no connected peers)", self.id);
+            self.rebuild_state_from_log().await;
+
+            let last_index = self.log.read().await.len() as u64;
+            {
+                let mut next_indices = self.next_index.write().await;
+                let mut match_indices = self.match_index.write().await;
+                for (&peer_id, _) in self.peers.iter() {
+                    next_indices.insert(peer_id, last_index + 1);
+                    match_indices.insert(peer_id, 0);
+                }
+            }
+            // no peers to heartbeat, but advance commit for solo progress
+            self.maybe_force_single_node_commit().await;
+            continue;
+        }
 
         for (&peer_id, _) in self.peers.iter() {
             self.send_message(peer_id, req.clone()).await;
@@ -866,6 +917,8 @@ impl NetNode {
             
             // Apply any newly committed entries
             self.apply_committed_entries().await;
+            // If isolated, still advance our own log
+            self.maybe_force_single_node_commit().await;
             
             for (&peer_id, _) in self.peers.iter() {
                 let next_index = {
@@ -899,6 +952,46 @@ impl NetNode {
         }
     }
     
+    async fn leader_rotation_loop(&self) {
+        let mut ticker = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            ticker.tick().await;
+            if !matches!(*self.state.read().await, RaftState::Leader) {
+                continue;
+            }
+            // When fully isolated, keep the lease indefinitely so the lone node stays available
+            if self.connected_peer_count().await == 0 {
+                continue;
+            }
+            let should_step_down = {
+                let since = self.leader_since.read().await;
+                since
+                    .map(|inst| inst.elapsed() >= MAX_LEADER_DURATION)
+                    .unwrap_or(false)
+            };
+            if should_step_down {
+                info!(
+                    "Node {} stepping down after {:?} as leader",
+                    self.id, MAX_LEADER_DURATION
+                );
+                self.force_step_down().await;
+            }
+        }
+    }
+    
+    async fn force_step_down(&self) {
+        *self.state.write().await = RaftState::Follower;
+        *self.voted_for.write().await = None;
+        *self.leader_since.write().await = None;
+        *self.leader_cooldown_until.write().await = Some(Instant::now() + LEADER_COOLDOWN);
+        let mut hb = self.last_heartbeat.write().await;
+        if let Some(adjusted) = Instant::now().checked_sub(Duration::from_millis(2500)) {
+            *hb = adjusted;
+        } else {
+            *hb = Instant::now();
+        }
+    }
+    
     
     async fn update_indices(&self, peer_id: u32, acked_index: u64) {
         // 1️⃣ Update follower’s replication state
@@ -910,10 +1003,14 @@ impl NetNode {
         }
 
         // 2️⃣ Compute possible majority commit index
-        let mut all_matches: Vec<u64> = {
+        let connected: Vec<u32> = self.outbound.lock().await.keys().copied().collect();
+        let mut all_matches: Vec<u64> = Vec::new();
+        {
             let m = self.match_index.read().await;
-            m.values().copied().collect()
-        };
+            for pid in connected.iter() {
+                all_matches.push(*m.get(pid).unwrap_or(&0));
+            }
+        }
         let leader_last = self.log.read().await.len() as u64;
         all_matches.push(leader_last); // include leader
         all_matches.sort_unstable();
@@ -1196,6 +1293,9 @@ impl NetNode {
         };
         info!("Node {}: appended new entry #{} '{}'", self.id, index, command);
 
+        // If we're effectively alone (no connected peers), commit immediately so we can make progress
+        self.maybe_force_single_node_commit().await;
+
         let term_now = *self.current_term.read().await;
         let commit_index = *self.commit_index.read().await;
         let log_snapshot = self.log.read().await;
@@ -1224,6 +1324,23 @@ impl NetNode {
                 leader_commit: commit_index,
             };
             self.send_message(peer_id, msg).await;
+        }
+    }
+
+    // When no peers are connected, behave like a single-node cluster and advance commit_index
+    async fn maybe_force_single_node_commit(&self) {
+        let connected = self.outbound.lock().await.len();
+        if connected > 0 {
+            return;
+        }
+        let last_index = self.log.read().await.len() as u64;
+        let mut commit_index = self.commit_index.write().await;
+        if last_index > *commit_index {
+            *commit_index = last_index;
+            info!(
+                "Node {} solo-committing up to index {} (no connected peers)",
+                self.id, last_index
+            );
         }
     }
 }
