@@ -13,9 +13,11 @@ use tracing::{debug, info, error};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
 use std::path::Path;
+use tokio::sync::Semaphore;
 
 const MAX_LEADER_DURATION: Duration = Duration::from_secs(30);
 const LEADER_COOLDOWN: Duration = Duration::from_secs(15);
+const MAX_CRYPTO_WORKERS: usize = 4;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -130,6 +132,8 @@ struct NetNode {
     client_listen_addr: SocketAddr,
     // What we advertise/forward to (reachable IP)
     client_public_addr: SocketAddr,
+    // Bounded pool for CPU-heavy crypto tasks
+    crypto_workers: Arc<Semaphore>,
 
 }
 
@@ -174,6 +178,7 @@ impl NetNode {
             client_base_port,
             client_listen_addr,
             client_public_addr,
+            crypto_workers: Arc::new(Semaphore::new(MAX_CRYPTO_WORKERS)),
         }
     }
 
@@ -833,7 +838,6 @@ impl NetNode {
     }
 
     // Apply committed log entries to state machine
-        // Apply committed log entries to state machine
     async fn apply_committed_entries(&self) {
         let commit_index = *self.commit_index.read().await;
         let mut last_applied = self.last_applied.write().await;
@@ -869,49 +873,77 @@ impl NetNode {
                             }
                         }
                         Some("ENCRYPT_IMAGE") => {
-                        // ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
-                        if let (Some(_id), Some(passphrase), Some(input_path), Some(output_path)) =
-                            (parts.next(), parts.next(), parts.next(), parts.next())
-                        {
-                        match tokio::fs::read(&input_path).await {
-                            Ok(plaintext_bytes) => {
-                                // <- your always-on cover file
-                                let cover_path = "images/cover_image.PNG";
-                                match tokio::fs::read(cover_path).await {
-                                    Ok(cover_bytes) => {
-                                        match encrypt_and_embed_to_png(
+                            // ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
+                            if let (Some(_id), Some(passphrase), Some(input_path), Some(output_path)) =
+                                (parts.next(), parts.next(), parts.next(), parts.next())
+                            {
+                                let input_path = input_path.to_string();
+                                let output_path = output_path.to_string();
+                                let passphrase = passphrase.to_string();
+                                let cover_path = "images/cover_image.PNG".to_string();
+                                let workers = self.crypto_workers.clone();
+                                let node_id = self.id;
+
+                                tokio::spawn(async move {
+                                    let _permit = workers.acquire_owned().await;
+
+                                    let plaintext_bytes = match tokio::fs::read(&input_path).await {
+                                        Ok(b) => b,
+                                        Err(e) => {
+                                            error!("Node {}: failed to read {}: {:?}", node_id, input_path, e);
+                                            return;
+                                        }
+                                    };
+
+                                    let cover_bytes = match tokio::fs::read(&cover_path).await {
+                                        Ok(b) => b,
+                                        Err(e) => {
+                                            error!("Node {}: failed to read cover image {}: {:?}", node_id, cover_path, e);
+                                            return;
+                                        }
+                                    };
+
+                                    let crypto = tokio::task::spawn_blocking(move || {
+                                        encrypt_and_embed_to_png(
                                             passphrase.as_bytes(),
-                                            &plaintext_bytes,   // plaintext = the user's image
-                                            &cover_bytes,       // cover     = the constant cover image
-                                        ) {
-                                            Ok((stego_bytes, sha, count)) => {
-                                                if let Some(parent) = Path::new(&output_path).parent() {
-                                                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                                                        error!("Node {}: create_dir_all {:?} failed: {:?}", self.id, parent, e);
-                                                        continue;
-                                                    }
-                                                }
-                                                if let Err(e) = tokio::fs::write(&output_path, &stego_bytes).await {
-                                                    error!("Node {}: failed to save stego image {}: {:?}", self.id, output_path, e);
-                                                } else {
-                                                    info!(
-                                                        "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
-                                                        self.id, input_path, output_path, count, sha
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => error!("Node {}: encryption/embed failed: {:?}", self.id, e),
+                                            &plaintext_bytes,
+                                            &cover_bytes,
+                                        )
+                                    })
+                                    .await;
+
+                                    let (stego_bytes, sha, count) = match crypto {
+                                        Ok(Ok(t)) => t,
+                                        Ok(Err(e)) => {
+                                            error!("Node {}: encryption/embed failed: {:?}", node_id, e);
+                                            return;
+                                        }
+                                        Err(e) => {
+                                            error!("Node {}: encryption task join failed: {:?}", node_id, e);
+                                            return;
+                                        }
+                                    };
+
+                                    if let Some(parent) = Path::new(&output_path).parent() {
+                                        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                                            error!("Node {}: create_dir_all {:?} failed: {:?}", node_id, parent, e);
+                                            return;
                                         }
                                     }
-                                    Err(e) => error!("Node {}: failed to read cover image {}: {:?}", self.id, cover_path, e),
-                                }
+
+                                    if let Err(e) = tokio::fs::write(&output_path, &stego_bytes).await {
+                                        error!("Node {}: failed to save stego image {}: {:?}", node_id, output_path, e);
+                                    } else {
+                                        info!(
+                                            "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
+                                            node_id, input_path, output_path, count, sha
+                                        );
+                                    }
+                                });
+                            } else {
+                                error!("Node {}: malformed ENCRYPT_IMAGE command '{}'", self.id, entry.command);
                             }
-                            Err(e) => error!("Node {}: failed to read {}: {:?}", self.id, input_path, e),
                         }
-                        } else {
-                            error!("Node {}: malformed ENCRYPT_IMAGE command '{}'", self.id, entry.command);
-                        }
-                    }
                         Some(other) => {
                             info!("Node {}: Unknown command '{}'", self.id, other);
                         }
