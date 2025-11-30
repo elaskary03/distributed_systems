@@ -21,7 +21,7 @@ use image::GenericImageView; // (not strictly needed, but fine to keep)
 #[command(author, version, about)]
 struct Args {
     /// Proxy listen address (what your users connect to), e.g. 0.0.0.0:9100
-    #[arg(long, default_value = "127.0.0.1:9100")]
+    #[arg(long, default_value = "0.0.0.0:9100")]
     listen: String,
 
     /// Comma-separated list of seed client API addresses (node-facing), e.g. 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003
@@ -438,14 +438,12 @@ async fn parse_first_line(reader: &mut BufReader<tokio::net::tcp::ReadHalf<'_>>)
 /// Read-only helper: try each seed until one returns something.
 /// This reads *until EOF or socket close*, which works with your current node's single-line loop output.
 async fn query_any(seeds: &[SocketAddr], cmd_line: &str) -> anyhow::Result<String> {
-    let mut last_err: Option<anyhow::Error> = None;
-
     for &addr in seeds {
         if let Ok(s) = read_multiline(addr, cmd_line).await {
             return Ok(s);
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no node responded")))
+    Err(anyhow::anyhow!("no node responded"))
 }
 
 async fn read_multiline(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<String> {
