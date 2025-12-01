@@ -9,7 +9,7 @@ use clap::Parser;
 use image::{imageops::FilterType, DynamicImage, ImageOutputFormat, GenericImageView};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::SystemTime};
+use std::{collections::HashMap, env, net::SocketAddr, path::{Path, PathBuf}, time::SystemTime};
 use tokio::fs;
 use tower_http::cors::{Any, CorsLayer};
 use cloud_p2p_raft::crypto::{embed_lsb_rgba, extract_n_bytes};
@@ -30,6 +30,13 @@ struct Args {
 struct AppState {
     owner: String,
     base: PathBuf,
+}
+
+#[derive(Clone)]
+struct OwnerPaths {
+    original: PathBuf,
+    encrypted: PathBuf,
+    meta: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -61,10 +68,8 @@ struct RequestImage {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let base = PathBuf::from("user_images");
-    let owner_root = base.join(&args.user);
-    fs::create_dir_all(&owner_root).await?;
-    fs::create_dir_all(owner_root.join("pending_updates")).await?;
+    let data_root = get_data_dir();
+    let base = data_root.join("p2p");
 
     let state = AppState {
         owner: args.user.clone(),
@@ -132,14 +137,14 @@ async fn upload_image(
         None => return (StatusCode::BAD_REQUEST, "missing file").into_response(),
     };
 
-    let folder = match ensure_owner_dirs(&st.base, &owner).await {
+    let owner_paths = match ensure_owner_paths(&st.base, &owner).await {
         Ok(p) => p,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("create dir: {e}"),
             )
-            .into_response();
+                .into_response();
         }
     };
     let base_perms: Option<HashMap<String, i64>> = permissions_raw
@@ -153,6 +158,15 @@ async fn upload_image(
     ensure_owner_default_perm(&mut meta);
     meta.last_update_ns = now_nanos();
 
+    // Save original
+    if let Err(e) = save_image(&owner_paths.original, &image_id, &img).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("save original: {e}"),
+        )
+            .into_response();
+    }
+
     let stego = match embed_metadata_into_png(&img, &meta) {
         Ok(b) => b,
         Err(e) => {
@@ -164,7 +178,7 @@ async fn upload_image(
         }
     };
 
-    if let Err(e) = save_image(&folder, &image_id, &stego).await {
+    if let Err(e) = save_image(&owner_paths.encrypted, &image_id, &stego).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("save image: {e}"),
@@ -172,7 +186,7 @@ async fn upload_image(
             .into_response();
     }
 
-    let _ = replay_pending(&folder, &image_id).await;
+    let _ = replay_pending(&owner_paths.meta, &image_id).await;
 
     Json(json!({"status":"ok"})).into_response()
 }
@@ -192,40 +206,44 @@ async fn list_images(
             if !owner_dir.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-            let dir_path = owner_dir.path();
-            if let Ok(mut rd) = fs::read_dir(&dir_path).await {
+            let enc_dir = owner_dir.path().join("encrypted");
+            let meta_dir = owner_dir.path().join("meta");
+            if let Ok(mut rd) = fs::read_dir(&enc_dir).await {
                 while let Ok(Some(entry)) = rd.next_entry().await {
-                    if entry.path().extension().and_then(|s| s.to_str()) == Some("png") {
-                        if let Some(id) = entry
-                            .path()
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.to_string())
-                        {
-                            if let Ok(mut meta) = load_metadata(&dir_path, &id).await {
-                                if meta.owner.is_empty() {
-                                    meta.owner = owner_dir.file_name().to_string_lossy().to_string();
-                                }
-                                let remaining = requester
-                                    .as_ref()
-                                    .and_then(|r| meta.permissions.get(r))
-                                    .copied()
-                                    .unwrap_or(0);
-                                let mut obj = json!({
-                                    "id": id,
-                                    "owner": meta.owner,
-                                    "permissions": meta.permissions,
-                                    "remaining_views_for_requester": remaining,
-                                    "last_update_ns": meta.last_update_ns
-                                });
-                                if is_owner && meta.owner == st.owner {
-                                    if let Ok(reqs) = load_pending_requests(&dir_path, &id).await {
-                                        obj["pending_requests"] = serde_json::to_value(reqs).unwrap_or(json!([]));
-                                    }
-                                }
-                                images.push(obj);
+                    if entry.path().extension().and_then(|s| s.to_str()) != Some("png") {
+                        continue;
+                    }
+                    let id = match entry
+                        .path()
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                    {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    if let Ok(mut meta) = load_metadata(&enc_dir, &id).await {
+                        if meta.owner.is_empty() {
+                            meta.owner = owner_dir.file_name().to_string_lossy().to_string();
+                        }
+                        let remaining = requester
+                            .as_ref()
+                            .and_then(|r| meta.permissions.get(r))
+                            .copied()
+                            .unwrap_or(0);
+                        let mut obj = json!({
+                            "id": id,
+                            "owner": meta.owner,
+                            "permissions": meta.permissions,
+                            "remaining_views_for_requester": remaining,
+                            "last_update_ns": meta.last_update_ns
+                        });
+                        if is_owner && meta.owner == st.owner {
+                            if let Ok(reqs) = load_pending_requests(&meta_dir, &id).await {
+                                obj["pending_requests"] = serde_json::to_value(reqs).unwrap_or(json!([]));
                             }
                         }
+                        images.push(obj);
                     }
                 }
             }
@@ -238,12 +256,13 @@ async fn preview_image(
     State(st): State<AppState>,
     AxumPath(image_id): AxumPath<String>,
 ) -> impl axum::response::IntoResponse {
-    let dir = find_image_dir(&st.base, &image_id)
-        .await
-        .unwrap_or_else(|| st.base.join(&st.owner));
-    let img_bytes = match load_image(&dir, &image_id).await {
+    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
+    let img_bytes = match load_image(&paths.original, &image_id).await {
         Ok(b) => b,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => match load_image(&paths.encrypted, &image_id).await {
+            Ok(b) => b,
+            Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        },
     };
     let img = match image::load_from_memory(&img_bytes) {
         Ok(i) => i,
@@ -266,18 +285,18 @@ async fn full_image(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl axum::response::IntoResponse {
     let requester = params.get("requester");
-    let dir = resolve_image_dir(&st.base, &st.owner, &image_id).await;
+    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
 
     let requester = match requester {
         Some(r) => r.clone(),
         None => return (StatusCode::BAD_REQUEST, "missing requester").into_response(),
     };
 
-    let mut meta = match load_metadata(&dir, &image_id).await {
+    let mut meta = match load_metadata(&paths.encrypted, &image_id).await {
         Ok(m) => m,
         Err(_) => {
             let _ = enqueue_pending(
-                &dir,
+                &paths.meta,
                 &image_id,
                 PendingUpdate::View {
                     requester: requester.clone(),
@@ -296,15 +315,15 @@ async fn full_image(
         }
         meta.permissions.insert(requester.clone(), quota - 1);
         meta.last_update_ns = now_nanos();
-        if let Ok(bytes) = load_image(&dir, &image_id).await {
+        if let Ok(bytes) = load_image(&paths.encrypted, &image_id).await {
             if let Ok(updated) = embed_metadata_into_png(&bytes, &meta) {
-                let _ = save_image(&dir, &image_id, &updated).await;
+                let _ = save_image(&paths.encrypted, &image_id, &updated).await;
             }
         }
-        let _ = replay_pending(&dir, &image_id).await;
+        let _ = replay_pending(&paths.meta, &image_id).await;
     }
 
-    match load_image(&dir, &image_id).await {
+    match load_image(&paths.encrypted, &image_id).await {
         Ok(bytes) => {
             let cd = format!("attachment; filename=\"{}.png\"", image_id);
             (
@@ -329,12 +348,12 @@ async fn request_image(
     if body.requester.trim().is_empty() || body.views <= 0 {
         return (StatusCode::BAD_REQUEST, "requester and positive views required").into_response();
     }
-    let dir = resolve_image_dir(&st.base, &st.owner, &image_id).await;
-    if load_image(&dir, &image_id).await.is_err() {
+    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
+    if load_image(&paths.encrypted, &image_id).await.is_err() {
         return (StatusCode::NOT_FOUND, "image not found").into_response();
     }
 
-    match load_metadata(&dir, &image_id).await {
+    match load_metadata(&paths.encrypted, &image_id).await {
         Ok(meta) => {
             if meta.permissions.get(&body.requester).copied().unwrap_or(0) > 0 {
                 return (StatusCode::BAD_REQUEST, "already has quota").into_response();
@@ -343,7 +362,7 @@ async fn request_image(
         Err(_) => {}
     }
 
-    let mut pending = load_pending_requests(&dir, &image_id)
+    let mut pending = load_pending_requests(&paths.meta, &image_id)
         .await
         .unwrap_or_default();
     if pending
@@ -356,7 +375,7 @@ async fn request_image(
         viewer: body.requester.clone(),
         requested_views: body.views,
     });
-    if let Err(e) = save_pending_requests(&dir, &image_id, &pending).await {
+    if let Err(e) = save_pending_requests(&paths.meta, &image_id, &pending).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("save pending: {e}")).into_response();
     }
 
@@ -371,8 +390,8 @@ async fn approve_request(
     if body.requester.trim().is_empty() || body.views <= 0 {
         return (StatusCode::BAD_REQUEST, "viewer and approved_views required").into_response();
     }
-    let dir = resolve_image_dir(&st.base, &st.owner, &image_id).await;
-    let img_bytes = match load_image(&dir, &image_id).await {
+    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
+    let img_bytes = match load_image(&paths.encrypted, &image_id).await {
         Ok(b) => b,
         Err(_) => return (StatusCode::NOT_FOUND, "image not found").into_response(),
     };
@@ -382,7 +401,7 @@ async fn approve_request(
         return (StatusCode::FORBIDDEN, "not owner").into_response();
     }
 
-    let mut pending = load_pending_requests(&dir, &image_id)
+    let mut pending = load_pending_requests(&paths.meta, &image_id)
         .await
         .unwrap_or_default();
     if !pending.iter().any(|r| r.viewer == body.requester) {
@@ -398,11 +417,11 @@ async fn approve_request(
         Ok(b) => b,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("embed: {e}")).into_response(),
     };
-    let _ = save_image(&dir, &image_id, &stego).await;
+    let _ = save_image(&paths.encrypted, &image_id, &stego).await;
 
     pending.retain(|r| r.viewer != body.requester);
-    let _ = save_pending_requests(&dir, &image_id, &pending).await;
-    let _ = replay_pending(&dir, &image_id).await;
+    let _ = save_pending_requests(&paths.meta, &image_id, &pending).await;
+    let _ = replay_pending(&paths.meta, &image_id).await;
 
     Json(json!({"status":"ok","permissions": meta.permissions})).into_response()
 }
@@ -415,8 +434,8 @@ async fn reject_request(
     if body.requester.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "viewer required").into_response();
     }
-    let dir = resolve_image_dir(&st.base, &st.owner, &image_id).await;
-    let img_bytes = match load_image(&dir, &image_id).await {
+    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
+    let img_bytes = match load_image(&paths.encrypted, &image_id).await {
         Ok(b) => b,
         Err(_) => return (StatusCode::NOT_FOUND, "image not found").into_response(),
     };
@@ -426,7 +445,7 @@ async fn reject_request(
         return (StatusCode::FORBIDDEN, "not owner").into_response();
     }
 
-    let mut pending = load_pending_requests(&dir, &image_id)
+    let mut pending = load_pending_requests(&paths.meta, &image_id)
         .await
         .unwrap_or_default();
     let orig = pending.len();
@@ -434,48 +453,49 @@ async fn reject_request(
     if orig == pending.len() {
         return (StatusCode::BAD_REQUEST, "no pending request").into_response();
     }
-    let _ = save_pending_requests(&dir, &image_id, &pending).await;
+    let _ = save_pending_requests(&paths.meta, &image_id, &pending).await;
     Json(json!({"status":"rejected","viewer": body.requester})).into_response()
 }
 
 // helpers
-async fn ensure_owner_dirs(base: &PathBuf, owner: &str) -> Result<PathBuf, anyhow::Error> {
-    let dir = base.join(owner);
-    fs::create_dir_all(&dir).await?;
-    fs::create_dir_all(dir.join("pending_updates")).await.ok();
-    Ok(dir)
-}
-
-async fn find_image_dir(base: &PathBuf, image_id: &str) -> Option<PathBuf> {
+async fn find_owner_paths(base: &PathBuf, image_id: &str) -> Option<OwnerPaths> {
     if let Ok(mut rd) = fs::read_dir(base).await {
         while let Ok(Some(entry)) = rd.next_entry().await {
             if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-            let dir = entry.path();
-            let meta_path = dir.join(format!("{}.png", image_id));
-            if fs::metadata(&meta_path).await.is_ok() {
-                return Some(dir);
+            let owner_dir = entry.path();
+            let enc_dir = owner_dir.join("encrypted");
+            let candidate = enc_dir.join(format!("{}.png", image_id));
+            if fs::metadata(&candidate).await.is_ok() {
+                return Some(OwnerPaths {
+                    original: owner_dir.join("original"),
+                    encrypted: enc_dir,
+                    meta: owner_dir.join("meta"),
+                });
             }
         }
     }
     None
 }
 
-async fn resolve_image_dir(base: &PathBuf, fallback_owner: &str, image_id: &str) -> PathBuf {
-    if let Some(dir) = find_image_dir(base, image_id).await {
-        return dir;
+async fn resolve_owner_paths(base: &PathBuf, owner: &str, image_id: &str) -> OwnerPaths {
+    if let Some(p) = find_owner_paths(base, image_id).await {
+        return p;
     }
-    ensure_owner_dirs(base, fallback_owner)
-        .await
-        .unwrap_or_else(|_| base.join(fallback_owner))
+    ensure_owner_paths(base, owner).await.unwrap_or_else(|_| OwnerPaths {
+        original: base.join(owner).join("original"),
+        encrypted: base.join(owner).join("encrypted"),
+        meta: base.join(owner).join("meta"),
+    })
 }
 
 // helpers
 async fn load_metadata(root: &PathBuf, id: &str) -> Result<Metadata, anyhow::Error> {
     let img = load_image(root, id).await?;
     let owner_hint = root
-        .file_name()
+        .parent()
+        .and_then(|p| p.file_name())
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     let mut meta = extract_metadata_from_png(&img, &owner_hint)?;
@@ -559,9 +579,12 @@ async fn replay_pending(root: &PathBuf, id: &str) -> Result<(), anyhow::Error> {
 async fn load_pending_requests(root: &PathBuf, id: &str) -> Result<Vec<PendingRequest>, anyhow::Error> {
     let dir = root.join("pending_requests");
     let path = dir.join(format!("{}.json", id));
-    let data = fs::read(&path).await?;
-    let reqs: Vec<PendingRequest> = serde_json::from_slice(&data).unwrap_or_default();
-    Ok(reqs)
+    if let Ok(data) = fs::read(&path).await {
+        let reqs: Vec<PendingRequest> = serde_json::from_slice(&data).unwrap_or_default();
+        Ok(reqs)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 async fn save_pending_requests(root: &PathBuf, id: &str, reqs: &[PendingRequest]) -> Result<(), anyhow::Error> {
@@ -656,4 +679,36 @@ fn extract_metadata_from_png(img_bytes: &[u8], owner_hint: &str) -> anyhow::Resu
         return Ok(Metadata { owner: owner_hint.to_string(), ..meta });
     }
     Ok(meta)
+}
+
+fn get_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Ok(local) = env::var("LOCALAPPDATA") {
+            return PathBuf::from(local).join("CloudP2P");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home).join(".cloudp2p");
+        }
+    }
+    PathBuf::from(".cloudp2p")
+}
+
+async fn ensure_owner_paths(base: &Path, owner: &str) -> Result<OwnerPaths, anyhow::Error> {
+    let owner_dir = base.join(owner);
+    let original = owner_dir.join("original");
+    let encrypted = owner_dir.join("encrypted");
+    let meta = owner_dir.join("meta");
+    fs::create_dir_all(&original).await?;
+    fs::create_dir_all(&encrypted).await?;
+    fs::create_dir_all(meta.join("pending_updates")).await.ok();
+    fs::create_dir_all(meta.join("pending_requests")).await.ok();
+    Ok(OwnerPaths {
+        original,
+        encrypted,
+        meta,
+    })
 }

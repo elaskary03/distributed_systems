@@ -7,7 +7,7 @@ use axum::{
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     fs as tokio_fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -70,27 +70,32 @@ struct FindStegoResp { stego_path: String }
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let uploads_dir = PathBuf::from("uploads");
-    let stego_dir = PathBuf::from("stego"); // NEW
+    let base_dir = get_data_dir();
+    let uploads_dir = base_dir.join("uploads");
+    let stego_dir = base_dir.join("stego"); // NEW
     fs::create_dir_all(&uploads_dir).ok();
     fs::create_dir_all(&stego_dir).ok();   // NEW
 
     let state = AppState {
         proxy_addr: Arc::new(args.proxy_addr),
-        uploads_dir: Arc::new(uploads_dir),
-        stego_dir: Arc::new(stego_dir),    // NEW
+        uploads_dir: Arc::new(uploads_dir.clone()),
+        stego_dir: Arc::new(stego_dir.clone()),    // NEW
     };
 
     // Serve both /files/uploads/* and /files/stego/* (so the browser can download them)
-    let files_router = Router::new()
-        .nest_service(
-            "/uploads",
-            ServeDir::new("uploads").append_index_html_on_directories(false),
-        )
-        .nest_service(
-            "/stego",
-            ServeDir::new("stego").append_index_html_on_directories(false),
-        );
+    let files_router = {
+        let uploads = uploads_dir.clone();
+        let stego = stego_dir.clone();
+        Router::new()
+            .nest_service(
+                "/uploads",
+                ServeDir::new(uploads).append_index_html_on_directories(false),
+            )
+            .nest_service(
+                "/stego",
+                ServeDir::new(stego).append_index_html_on_directories(false),
+            )
+    };
 
     let app = Router::new()
         .route("/", get(ui))
@@ -1101,4 +1106,20 @@ fn next_op_id() -> String {
     let mut r = [0u8; 4];
     OsRng.fill_bytes(&mut r);
     format!("gui-{}-{:02x}{:02x}{:02x}{:02x}", now_nanos(), r[0], r[1], r[2], r[3])
+}
+
+fn get_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Ok(local) = env::var("LOCALAPPDATA") {
+            return PathBuf::from(local).join("CloudP2P");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home).join(".cloudp2p");
+        }
+    }
+    PathBuf::from(".cloudp2p")
 }

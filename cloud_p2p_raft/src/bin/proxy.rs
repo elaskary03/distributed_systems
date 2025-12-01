@@ -1,6 +1,6 @@
 use clap::{Parser, ValueEnum};
 use rand::{distributions::Alphanumeric, Rng};
-use std::{fs, net::SocketAddr, path::Path, str::FromStr, time::Duration};
+use std::{env, fs, net::SocketAddr, path::{Path, PathBuf}, str::FromStr, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -320,7 +320,8 @@ async fn handle_client(
             };
 
             // Find the uploaded file saved by the GUI (pattern: uploads/<image_id>-<original_name>)
-            let input_path = match find_upload_by_prefix("uploads", image_id) {
+            let uploads_dir = get_data_dir().join("uploads");
+            let input_path = match find_upload_by_prefix(&uploads_dir, image_id) {
                 Ok(p) => p,
                 Err(e) => {
                     w.write_all(format!("ERR input not found: {}\n", e).as_bytes()).await?;
@@ -329,14 +330,14 @@ async fn handle_client(
             };
 
             // Output goes to stego/<image_id>.png (uniform & predictable)
-            let output_path = format!("stego/{}.png", image_id);
+            let output_path = get_data_dir().join("stego").join(format!("{}.png", image_id));
             if let Some(parent) = Path::new(&output_path).parent() {
                 let _ = fs::create_dir_all(parent);
             }
 
             let op_id = next_op_id();
             let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}",
-                op_id, image_id, pass, input_path, output_path);
+                op_id, image_id, pass, input_path, output_path.to_string_lossy());
 
             let resp = submit_idempotent(&seeds, &cfg, &payload).await;
             write_line(&mut w, resp).await?;
@@ -655,7 +656,7 @@ fn now_nanos() -> u128 {
         .as_nanos()
 }
 
-fn find_upload_by_prefix(dir: &str, image_id_prefix: &str) -> anyhow::Result<String> {
+fn find_upload_by_prefix(dir: &PathBuf, image_id_prefix: &str) -> anyhow::Result<String> {
     let mut chosen: Option<String> = None;
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -668,4 +669,20 @@ fn find_upload_by_prefix(dir: &str, image_id_prefix: &str) -> anyhow::Result<Str
         }
     }
     chosen.ok_or_else(|| anyhow::anyhow!("no file starting with '{}-'", image_id_prefix))
+}
+
+fn get_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Ok(local) = env::var("LOCALAPPDATA") {
+            return PathBuf::from(local).join("CloudP2P");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home).join(".cloudp2p");
+        }
+    }
+    PathBuf::from(".cloudp2p")
 }
