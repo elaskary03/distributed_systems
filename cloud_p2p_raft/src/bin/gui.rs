@@ -98,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/unregister", post(api_unregister))
         .route("/api/leader", get(api_leader))
         .route("/api/users", get(api_users))
+        .route("/api/peers", get(api_peers))
         .route("/api/list", get(api_list))
         .route("/api/upload", post(api_upload))
         .route("/api/decrypt", post(api_decrypt))         // client-side decrypt
@@ -115,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
 /* =========================
    UI (HTML) – light theme, robust layout
    ========================= */
-async fn ui() -> impl IntoResponse {
+async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     const PAGE: &str = r#"<!doctype html>
 <html>
 <head>
@@ -219,106 +220,158 @@ async fn ui() -> impl IntoResponse {
     <h1>Cloud P2P GUI</h1>
     <div class="sub">Proxy-backed UI for your Raft cluster. Upload an image to encrypt & embed via the cluster. Manage users and inspect state.</div>
 
-    <!-- Top row: Upload (spans wider) + Leader -->
-    <div class="grid-2-1">
-      <section>
-        <h2>🖼️ Upload & Encrypt <span class="badge">ENCRYPT_ON_CLOUD</span></h2>
-        <form id="uploadForm">
-          <div class="row">
-            <div>
-              <label>Image file</label>
-              <input type="file" name="file" required>
-            </div>
-            <div>
-              <label>Passphrase</label>
-              <input type="password" name="passphrase" placeholder="required by proxy">
-            </div>
-          </div>
-          <div style="margin-top:12px" class="btns">
-            <button type="submit" class="btn-accent">Upload & Encrypt</button>
-          </div>
-        </form>
-        <div id="uploadOut" class="out"></div>
-        <div class="hint">Encrypted image will be saved under <span class="pill">uploads/</span> or <span class="pill">stego/</span> by the cluster. The GUI will auto-download it once detected.</div>
-      </section>
-
-      <section>
-        <h2>👑 Leader</h2>
-        <div class="btns">
-          <button id="leaderBtn">LEADER</button>
-        </div>
-        <div id="leaderOut" class="out"></div>
-      </section>
-    </div>
-
-    <!-- Second row: Users & Inspect side-by-side (auto-fit, no overlap) -->
-    <div class="grid">
-      <section>
-        <h2>👤 Users — Register / Unregister</h2>
-        <form id="regForm" style="margin-bottom:8px">
-          <div class="row">
-            <div>
-              <label>User</label>
-              <input name="user" type="text" placeholder="alice" required>
-            </div>
-            <div>
-              <label>IP</label>
-              <input name="ip" type="text" placeholder="10.0.0.1" required>
-            </div>
-          </div>
-          <div style="margin-top:8px" class="btns">
-            <button type="submit" class="btn-ok">REGISTER</button>
-            <button type="button" id="unregBtn" class="btn-warn">UNREGISTER</button>
-          </div>
-        </form>
-        <div id="regOut" class="out"></div>
-      </section>
-
-      <section>
-        <h2>📜 Inspect</h2>
-        <div class="btns" style="margin-bottom:8px">
-          <button id="usersBtn">SHOW_USERS</button>
-          <button id="listBtn">LIST</button>
+    <!-- Login Screen -->
+    <section id="login-screen" style="max-width:480px;margin:0 auto 16px; display:block;">
+      <h2>🔌 Connect</h2>
+      <div class="row">
+        <div>
+          <label>Username</label>
+          <input id="loginUser" type="text" placeholder="alice" required>
         </div>
         <div>
-          <label>SHOW_USERS Output</label>
-          <div id="usersOut" class="out"></div>
+          <label>IP Address</label>
+          <input id="loginIp" type="text" placeholder="10.0.0.1" required>
         </div>
-        <div style="margin-top:10px">
-          <label>LIST Output</label>
-          <div id="listOut" class="out"></div>
-        </div>
-      </section>
-    </div>
+      </div>
+      <div style="margin-top:10px" class="btns">
+        <button id="loginBtn" class="btn-accent">Connect</button>
+      </div>
+      <div id="loginOut" class="out" style="display:none;"></div>
+    </section>
 
-    <!-- Third row: Client-side Decrypt -->
-    <div class="grid">
-      <section>
-        <h2>🗝️ Decrypt Local Image <span class="badge">client-side</span></h2>
-        <form id="decryptForm">
-          <div class="row">
-            <div>
-              <label>Stego image (PNG/JPEG)</label>
-              <input type="file" name="file" accept="image/png,image/jpeg" required>
+    <!-- Main App (hidden until login) -->
+    <div id="main-app" style="display:none;">
+      <div style="display:flex; justify-content:flex-end; align-items:center; gap:12px; margin-bottom:8px;">
+        <div id="sessionLabel" class="pill">Logged in as: -</div>
+        <button id="offlineBtn" class="btn-warn">Go Offline</button>
+      </div>
+
+      <!-- Top row: Upload (spans wider) + Leader -->
+      <div class="grid-2-1">
+        <section>
+          <h2>🖼️ Upload & Encrypt <span class="badge">ENCRYPT_ON_CLOUD</span></h2>
+          <form id="uploadForm">
+            <div class="row">
+              <div>
+                <label>Image file</label>
+                <input type="file" name="file" required>
+              </div>
+              <div>
+                <label>Passphrase</label>
+                <input type="password" name="passphrase" placeholder="required by proxy">
+              </div>
             </div>
-            <div>
-              <label>Passphrase</label>
-              <input type="password" name="passphrase" placeholder="the same key you used" required>
+            <div style="margin-top:12px" class="btns">
+              <button type="submit" class="btn-accent">Upload & Encrypt</button>
             </div>
+          </form>
+          <div id="uploadOut" class="out"></div>
+          <div class="hint">Encrypted image will be saved under <span class="pill">uploads/</span> or <span class="pill">stego/</span> by the cluster. The GUI will auto-download it once detected.</div>
+        </section>
+
+        <section>
+          <h2>👑 Leader</h2>
+          <div class="btns">
+            <button id="leaderBtn">LEADER</button>
           </div>
-          <div style="margin-top:12px" class="btns">
-            <button type="submit">Decrypt & Download Payload</button>
+          <div id="leaderOut" class="out"></div>
+        </section>
+      </div>
+
+      <!-- Second row: Inspect -->
+      <div class="grid">
+        <section>
+          <h2>📜 Inspect</h2>
+          <div class="btns" style="margin-bottom:8px">
+            <button id="usersBtn">SHOW_USERS</button>
+            <button id="peersBtn">LIST_PEERS</button>
+            <button id="listBtn">LIST</button>
           </div>
-        </form>
-        <div id="decryptOut" class="out"></div>
-        <div class="hint">Runs on the GUI server (not the cluster). If the payload is an image, it downloads with the right extension; otherwise falls back to <span class="pill">decrypted.bin</span>.</div>
-      </section>
+          <div>
+            <label>SHOW_USERS Output</label>
+            <div id="usersOut" class="out"></div>
+          </div>
+          <div style="margin-top:10px">
+            <label>LIST_PEERS Output</label>
+            <div id="peersOut" class="out"></div>
+          </div>
+          <div style="margin-top:10px">
+            <label>LIST Output</label>
+            <div id="listOut" class="out"></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Third row: Client-side Decrypt -->
+      <div class="grid">
+        <section>
+          <h2>🗝️ Decrypt Local Image <span class="badge">client-side</span></h2>
+          <form id="decryptForm">
+            <div class="row">
+              <div>
+                <label>Stego image (PNG/JPEG)</label>
+                <input type="file" name="file" accept="image/png,image/jpeg" required>
+              </div>
+              <div>
+                <label>Passphrase</label>
+                <input type="password" name="passphrase" placeholder="the same key you used" required>
+              </div>
+            </div>
+            <div style="margin-top:12px" class="btns">
+              <button type="submit">Decrypt & Download Payload</button>
+            </div>
+          </form>
+          <div id="decryptOut" class="out"></div>
+          <div class="hint">Runs on the GUI server (not the cluster). If the payload is an image, it downloads with the right extension; otherwise falls back to <span class="pill">decrypted.bin</span>.</div>
+        </section>
+      </div>
     </div>
   </div>
 
   <script>
     const $ = sel => document.querySelector(sel);
     const text = (id, s) => ($(id).textContent = s);
+    const WS_URL = "{{WS_URL}}";
+    let presenceWs = null;
+    let currentUser = "";
+    let currentIp = "";
+
+    // Maintain a websocket presence session. Server auto-unregisters on disconnect.
+    function connectPresence() {
+      if (!currentUser || !currentIp) return;
+
+      if (presenceWs && (presenceWs.readyState === WebSocket.OPEN || presenceWs.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+
+      presenceWs = new WebSocket(WS_URL);
+      presenceWs.onopen = () => {
+        try { presenceWs.send(`REGISTER ${currentUser} ${currentIp}`); } catch (e) { console.error(e); }
+      };
+      presenceWs.onclose = () => {
+        // No auto-reconnect; only reconnect when user explicitly connects again
+      };
+      presenceWs.onerror = (e) => {
+        console.error('ws error', e);
+        try { presenceWs.close(); } catch (_) {}
+      };
+    }
+
+    function clearOutputs() {
+      ['uploadOut','usersOut','peersOut','listOut','leaderOut','decryptOut','loginOut'].forEach(id => text('#'+id, ''));
+    }
+
+    function showMainUI(show) {
+      const login = document.getElementById('login-screen');
+      const main = document.getElementById('main-app');
+      if (show) {
+        login.style.display = 'none';
+        main.style.display = 'block';
+      } else {
+        login.style.display = 'block';
+        main.style.display = 'none';
+      }
+    }
 
     // Ask the server to locate the stego file path for this image_id
     async function pollFindStego(imageId, timeoutMs = 15000) {
@@ -333,6 +386,24 @@ async fn ui() -> impl IntoResponse {
       }
       return null;
     }
+
+    /* Login */
+    $('#loginBtn').addEventListener('click', async () => {
+      const user = ($('#loginUser').value || '').trim();
+      const ip = ($('#loginIp').value || '').trim();
+      if (!user || !ip) {
+        text('#loginOut', 'Username and IP are required');
+        document.getElementById('loginOut').style.display = 'block';
+        return;
+      }
+      currentUser = user;
+      currentIp = ip;
+      document.getElementById('sessionLabel').textContent = `Logged in as: ${user} (${ip})`;
+      showMainUI(true);
+      document.getElementById('loginOut').style.display = 'none';
+      clearOutputs();
+      connectPresence();
+    });
 
     /* Upload & ENCRYPT_ON_CLOUD */
     $('#uploadForm').addEventListener('submit', async (e) => {
@@ -360,35 +431,6 @@ async fn ui() -> impl IntoResponse {
       } catch (err) { text('#uploadOut', String(err)); }
     });
 
-    /* Register */
-    $('#regForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const f = new FormData(e.target);
-      const body = { user: f.get('user'), ip: f.get('ip') };
-      try {
-        const res = await fetch('/api/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-        });
-        text('#regOut', await res.text());
-      } catch (err) { text('#regOut', String(err)); }
-    });
-
-    /* Unregister */
-    $('#unregBtn').addEventListener('click', async () => {
-      const f = new FormData($('#regForm'));
-      const user = f.get('user');
-      try {
-        const res = await fetch('/api/unregister', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user })
-        });
-        text('#regOut', await res.text());
-      } catch (err) { text('#regOut', String(err)); }
-    });
-
     /* SHOW_USERS */
     $('#usersBtn').addEventListener('click', async () => {
       try { text('#usersOut', await (await fetch('/api/users')).text()); }
@@ -401,10 +443,34 @@ async fn ui() -> impl IntoResponse {
       catch (err) { text('#listOut', String(err)); }
     });
 
+    /* LIST_PEERS */
+    $('#peersBtn').addEventListener('click', async () => {
+      try { text('#peersOut', await (await fetch('/api/peers')).text()); }
+      catch (err) { text('#peersOut', String(err)); }
+    });
+
     /* LEADER */
     $('#leaderBtn').addEventListener('click', async () => {
       try { text('#leaderOut', await (await fetch('/api/leader')).text()); }
       catch (err) { text('#leaderOut', String(err)); }
+    });
+
+    /* Go Offline */
+    $('#offlineBtn').addEventListener('click', async () => {
+      if (!currentUser) { return; }
+      try {
+        await fetch('/api/unregister', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: currentUser })
+        });
+      } catch (_) {}
+      currentUser = "";
+      currentIp = "";
+      if (presenceWs) { try { presenceWs.close(); } catch (_) {} presenceWs = null; }
+      clearOutputs();
+      showMainUI(false);
+      document.getElementById('sessionLabel').textContent = 'Logged in as: -';
     });
 
     /* Client-side Decrypt */
@@ -440,9 +506,12 @@ async fn ui() -> impl IntoResponse {
 </html>
 "#;
 
+    let ws_url = format!("ws://{}", st.proxy_addr);
+    let page = PAGE.replace("{{WS_URL}}", &ws_url);
+
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
-    (StatusCode::OK, headers, Html(PAGE))
+    (StatusCode::OK, headers, Html(page))
 }
 
 /* =========================
@@ -476,6 +545,9 @@ async fn api_leader(State(st): State<AppState>) -> impl IntoResponse {
 }
 async fn api_users(State(st): State<AppState>) -> impl IntoResponse {
     proxy_send_multiline(&st.proxy_addr, "SHOW_USERS").await.into_response()
+}
+async fn api_peers(State(st): State<AppState>) -> impl IntoResponse {
+    proxy_send_multiline(&st.proxy_addr, "LIST_PEERS").await.into_response()
 }
 async fn api_list(State(st): State<AppState>) -> impl IntoResponse {
     proxy_send_multiline(&st.proxy_addr, "LIST").await.into_response()

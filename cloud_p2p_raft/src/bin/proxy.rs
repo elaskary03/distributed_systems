@@ -10,8 +10,10 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    time::sleep,
+    time::{sleep, timeout},
 };
+use futures::{StreamExt, SinkExt};
+use tokio_tungstenite::accept_async;
 
 use cloud_p2p_raft::crypto::{extract_payload, decrypt_bytes};
 use image::GenericImageView; // (not strictly needed, but fine to keep)
@@ -74,17 +76,75 @@ async fn main() -> anyhow::Result<()> {
         };
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, seeds, cfg).await {
+            // Non-blocking sniff for "GET" to detect WebSocket upgrade; fallback to legacy protocol
+            let mut peek = [0u8; 3];
+            let is_ws = match timeout(Duration::from_millis(20), stream.peek(&mut peek)).await {
+                Ok(Ok(n)) if n >= 3 && &peek == b"GET" => true,
+                _ => false,
+            };
+
+            if is_ws {
+                if let Err(e) = handle_ws(stream, seeds, cfg).await {
+                    eprintln!("ws handler error: {e:?}");
+                }
+            } else if let Err(e) = handle_client(stream, seeds, cfg).await {
                 eprintln!("client handler error: {e:?}");
             }
         });
     }
 }
 
+#[derive(Clone)]
 struct ProxyCfg {
     first_try: FirstTry,
     max_retries: usize,
     backoff_ms: u64,
+}
+
+/// WebSocket handler: auto-register on open, auto-unregister on disconnect.
+async fn handle_ws(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg) -> anyhow::Result<()> {
+    let mut ws = accept_async(stream).await?;
+    let mut current_user: Option<String> = None;
+    let mut ws_ping = tokio::time::interval(Duration::from_secs(20));
+
+    loop {
+        tokio::select! {
+            _ = ws_ping.tick() => {
+                let _ = ws.send(tokio_tungstenite::tungstenite::Message::Ping(Vec::new())).await;
+            }
+            Some(msg) = ws.next() => {
+                let msg = match msg {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("ws recv error: {e:?}");
+                        break;
+                    }
+                };
+
+                if msg.is_text() {
+                    let text = msg.into_text()?;
+                    let mut parts = text.split_whitespace();
+                    match (parts.next(), parts.next(), parts.next()) {
+                        (Some("REGISTER"), Some(user), Some(ip)) => {
+                            current_user = Some(user.to_string());
+                            let op_id = next_op_id();
+                            let payload = format!("SUBMIT {} REGISTER {} {}", op_id, user, ip);
+                            let resp = submit_idempotent(&seeds, &cfg, &payload).await;
+                            if let Ok(s) = resp {
+                                let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(s)).await;
+                            }
+                        }
+                        _ => {
+                            let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text("ERR unknown ws message".into())).await;
+                        }
+                    }
+                }
+            }
+            else => break,
+        }
+    }
+
+    Ok(())
 }
 
 async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg) -> anyhow::Result<()> {
@@ -94,7 +154,7 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
 
     // Present a simple banner (your proxy protocol)
     w.write_all(b"Welcome to Cloud P2P Proxy!\n").await?;
-    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | SHOW_USERS | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
+    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | LIST_PEERS | SHOW_USERS | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
 
     loop {
         line.clear();
@@ -143,6 +203,13 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
             "SHOW_USERS" => {
                 // read-only; ask any node until success, return raw (multi-line)
                 match query_any(&seeds, "SHOW_USERS").await {
+                    Ok(s) => w.write_all(s.as_bytes()).await?,
+                    Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
+                }
+            }
+
+            "LIST_PEERS" => {
+                match query_any(&seeds, "LIST_PEERS").await {
                     Ok(s) => w.write_all(s.as_bytes()).await?,
                     Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
                 }

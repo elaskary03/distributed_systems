@@ -20,6 +20,7 @@ futures = "0.3"
 hyper = "1"
 tower = "0.5"
 thiserror = "1"
+tokio-tungstenite = "0.21"
 
 # --- GUI additions ---
 # Web framework with multipart upload support

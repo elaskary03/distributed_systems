@@ -54,6 +54,14 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserEntry {
+    pub username: String,
+    pub ip: String,
+    pub status: String,
+    pub last_seen: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RaftMessage {
     RequestVote {
         term: u64,
@@ -120,7 +128,7 @@ struct NetNode {
     match_index: Arc<RwLock<HashMap<u32, u64>>>,
     // Hint for who is leader (updated when we receive AppendEntries)
     leader_hint: Arc<RwLock<Option<u32>>>,
-    registered_users: Arc<RwLock<HashMap<String, String>>>,
+    registered_users: Arc<RwLock<HashMap<String, UserEntry>>>,
     // Idempotency for broadcasted client requests
     processed_ops: Arc<RwLock<std::collections::HashSet<String>>>,
     // Track when we became leader to enforce a max leadership duration
@@ -145,7 +153,7 @@ impl NetNode {
         client_listen_addr: SocketAddr,
         client_public_addr: SocketAddr,
     ) -> Self {
-        let peers_arc = Arc::new(peers);
+            let peers_arc = Arc::new(peers);
         let peer_ids: Vec<u32> = peers_arc.keys().cloned().collect();
         
         // Initialize next_index and match_index for all peers
@@ -189,6 +197,15 @@ impl NetNode {
     #[inline]
     fn clamp1(n: u64) -> u64 {
         if n == 0 { 1 } else { n }
+    }
+
+    #[inline]
+    fn now_millis() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
     }
 
     #[inline]
@@ -583,35 +600,45 @@ impl NetNode {
                     *self.last_heartbeat.write().await = Instant::now();
                     
                     let mut log = self.log.write().await;
-                    
-                    // Check log consistency
-                    let log_ok = if prev_log_index == 0 {
-                        true
-                    } else if prev_log_index > log.len() as u64 {
-                        false
-                    } else {
-                        log.get(prev_log_index as usize - 1)
-                           .map_or(false, |e| e.term == prev_log_term)
-                    };
-                    
-                    if !log_ok {
-                        info!("Node {} log inconsistency at index {}", self.id, prev_log_index);
-                    } else {
-                        // Truncate conflicting entries and append new ones
-                        if prev_log_index < log.len() as u64 {
-                            log.truncate(prev_log_index as usize);
+
+                    // Reject if prev index out of range or term mismatch
+                    if prev_log_index > log.len() as u64 {
+                        info!("Node {} log inconsistency (missing index {})", self.id, prev_log_index);
+                    } else if prev_log_index > 0 {
+                        let term_ok = log
+                            .get(prev_log_index as usize - 1)
+                            .map(|e| e.term == prev_log_term)
+                            .unwrap_or(false);
+                        if !term_ok {
+                            info!("Node {} log term mismatch at {}", self.id, prev_log_index);
+                        } else {
+                            // Truncate conflicting entries beyond prev_log_index
+                            if log.len() as u64 > prev_log_index {
+                                log.truncate(prev_log_index as usize);
+                            }
+                            // Append new entries
+                            log.extend_from_slice(&entries);
+                            let mut commit_index = self.commit_index.write().await;
+                            if leader_commit > *commit_index {
+                                *commit_index = leader_commit.min(log.len() as u64);
+                                info!("Node {} updated commit_index to {}", self.id, *commit_index);
+                            }
+                            drop(commit_index);
+                            drop(log);
+                            self.apply_committed_entries().await;
+                            success = true;
                         }
+                    } else {
+                        // prev_log_index == 0 always matches
+                        log.truncate(0);
                         log.extend_from_slice(&entries);
-                        
-                        // Update commit index
                         let mut commit_index = self.commit_index.write().await;
                         if leader_commit > *commit_index {
                             *commit_index = leader_commit.min(log.len() as u64);
                             info!("Node {} updated commit_index to {}", self.id, *commit_index);
                         }
-                                                // Apply any newly committed entries on this follower as well
-                        drop(commit_index); // release lock before await
-                        drop(log);          // release lock before await
+                        drop(commit_index);
+                        drop(log);
                         self.apply_committed_entries().await;
                         success = true;
                     }
@@ -648,6 +675,8 @@ impl NetNode {
                             *next_idx = Self::clamp1(next_idx.saturating_sub(1)); // clamp to ≥1
                             info!("Node {} decreased next_index for {} to {}", self.id, sender_id, *next_idx);
                         }
+                        drop(next_indices);
+                        self.send_append_entries(sender_id).await;
                     }
                 }
             }
@@ -818,14 +847,30 @@ impl NetNode {
                 match parts.next() {
                     Some("REGISTER") => {
                         if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
-                            self.registered_users
-                                .write().await
-                                .insert(user.to_string(), ip.to_string());
+                            let mut map = self.registered_users.write().await;
+                            map.insert(user.to_string(), UserEntry {
+                                username: user.to_string(),
+                                ip: ip.to_string(),
+                                status: "online".to_string(),
+                                last_seen: Self::now_millis(),
+                            });
                         }
                     }
                     Some("UNREGISTER") => {
                         if let Some(user) = parts.next() {
-                            self.registered_users.write().await.remove(user);
+                            let mut map = self.registered_users.write().await;
+                            if let Some(entry) = map.get_mut(user) {
+                                entry.status = "offline".to_string();
+                                entry.ip.clear();
+                                entry.last_seen = Self::now_millis();
+                            } else {
+                                map.insert(user.to_string(), UserEntry {
+                                    username: user.to_string(),
+                                    ip: String::new(),
+                                    status: "offline".to_string(),
+                                    last_seen: Self::now_millis(),
+                                });
+                            }
                         }
                     }
                     _ => {}
@@ -837,7 +882,7 @@ impl NetNode {
             self.id, self.registered_users.read().await.len());
     }
 
-    // Apply committed log entries to state machine
+        // Apply committed log entries to state machine
     async fn apply_committed_entries(&self) {
         let commit_index = *self.commit_index.read().await;
         let mut last_applied = self.last_applied.write().await;
@@ -854,9 +899,13 @@ impl NetNode {
                     match parts.next() {
                         Some("REGISTER") => {
                             if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
-                                self.registered_users
-                                    .write().await
-                                    .insert(user.to_string(), ip.to_string());
+                                let mut map = self.registered_users.write().await;
+                                map.insert(user.to_string(), UserEntry {
+                                    username: user.to_string(),
+                                    ip: ip.to_string(),
+                                    status: "online".to_string(),
+                                    last_seen: Self::now_millis(),
+                                });
                                 info!("Node {}: Applied REGISTER {} {}", self.id, user, ip);
                             } else {
                                 info!("Node {}: Malformed REGISTER command '{}'", self.id, entry.command);
@@ -864,9 +913,19 @@ impl NetNode {
                         }
                         Some("UNREGISTER") => {
                             if let Some(user) = parts.next() {
-                                self.registered_users
-                                    .write().await
-                                    .remove(user);
+                                let mut map = self.registered_users.write().await;
+                                if let Some(entry) = map.get_mut(user) {
+                                    entry.status = "offline".to_string();
+                                    entry.ip.clear();
+                                    entry.last_seen = Self::now_millis();
+                                } else {
+                                    map.insert(user.to_string(), UserEntry {
+                                        username: user.to_string(),
+                                        ip: String::new(),
+                                        status: "offline".to_string(),
+                                        last_seen: Self::now_millis(),
+                                    });
+                                }
                                 info!("Node {}: Applied UNREGISTER {}", self.id, user);
                             } else {
                                 info!("Node {}: Malformed UNREGISTER command '{}'", self.id, entry.command);
@@ -955,6 +1014,46 @@ impl NetNode {
         }
     }
 
+    // Build and send AppendEntries for a specific peer based on next_index
+    async fn send_append_entries(&self, peer_id: u32) {
+        if !matches!(*self.state.read().await, RaftState::Leader) {
+            return;
+        }
+        let term = *self.current_term.read().await;
+        let commit_index = *self.commit_index.read().await;
+        let log = self.log.read().await;
+
+        let next_index = {
+            let next_indices = self.next_index.read().await;
+            next_indices.get(&peer_id).copied().unwrap_or(1)
+        };
+
+        let prev_log_index = next_index.saturating_sub(1);
+        let prev_log_term = if prev_log_index == 0 {
+            0
+        } else {
+            log.get(prev_log_index as usize - 1).map(|e| e.term).unwrap_or(0)
+        };
+
+        let start_idx = next_index.saturating_sub(1);
+        let start_usize = usize::try_from(start_idx).unwrap_or(0);
+        let entries: Vec<LogEntry> = if start_usize > log.len() {
+            Vec::new()
+        } else {
+            log[start_usize..].to_vec()
+        };
+
+        let msg = RaftMessage::AppendEntries {
+            term,
+            leader_id: self.id,
+            prev_log_index,
+            prev_log_term,
+            entries,
+            leader_commit: commit_index,
+        };
+        self.send_message(peer_id, msg).await;
+    }
+
     async fn heartbeat_loop(&self) {
         loop {
             // Heartbeat interval should be significantly less than election timeout but not too aggressive
@@ -974,33 +1073,7 @@ impl NetNode {
             self.maybe_force_single_node_commit().await;
             
             for (&peer_id, _) in self.peers.iter() {
-                let next_index = {
-                    let next_indices = self.next_index.read().await;
-                    next_indices.get(&peer_id).copied().unwrap_or(1)
-                };
-                
-                // Prepare entries to send
-                let (prev_log_index, prev_log_term) = Self::prev_ptr(next_index, &log);
-                
-                // Get entries starting from next_index (avoid underflow)
-                let start_idx = next_index.saturating_sub(1);            // u64
-                let start_usize = usize::try_from(start_idx).unwrap_or(0);
-                let entries: Vec<LogEntry> = if next_index == 0 || start_usize > log.len() {
-                    Vec::new()
-                } else {
-                    log[start_usize..].to_vec()
-                };
-                
-                // Send AppendEntries RPC
-                let msg = RaftMessage::AppendEntries {
-                    term,
-                    leader_id: self.id,
-                    prev_log_index,
-                    prev_log_term,
-                    entries,
-                    leader_commit: commit_index,
-                };
-                self.send_message(peer_id, msg).await;
+                self.send_append_entries(peer_id).await;
             }
         }
     }
@@ -1115,7 +1188,7 @@ impl NetNode {
         let mut line = String::new();
 
         w.write_all(b"Welcome to Cloud P2P Node API!\n").await?;
-        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST | SHOW_USERS | SUBMIT <op_id> <command...> | ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
+        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST | SHOW_USERS | LIST_PEERS | SUBMIT <op_id> <command...> | ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
 
         loop {
             line.clear();
@@ -1243,9 +1316,40 @@ impl NetNode {
                     if users.is_empty() {
                         w.write_all(b"(empty)\n").await?;
                     } else {
-                        for (u, ip) in users.iter() {
-                            w.write_all(format!("{} {}\n", u, ip).as_bytes()).await?;
+                        for (_, entry) in users.iter() {
+                            w.write_all(format!("{} {} {}\n", entry.username, entry.ip, entry.status).as_bytes()).await?;
                         }
+                    }
+                }
+                Some("LIST_PEERS") => {
+                    if !is_leader {
+                        match self.forward_to_leader("LIST_PEERS").await {
+                            Ok(reply) => {
+                                w.write_all(reply.as_bytes()).await?;
+                            }
+                            Err(_) => {
+                                if let Some(lid) = *self.leader_hint.read().await {
+                                    let addr = self.client_addr_for(lid);
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                } else {
+                                    w.write_all(b"NOT_LEADER\n").await?;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    let users = self.registered_users.read().await;
+                    let mut out = String::new();
+                    for (_, entry) in users.iter() {
+                        if entry.status == "online" && !entry.ip.is_empty() {
+                            out.push_str(&format!("{} {}\n", entry.username, entry.ip));
+                        }
+                    }
+                    if out.is_empty() {
+                        w.write_all(b"(empty)\n").await?;
+                    } else {
+                        w.write_all(out.as_bytes()).await?;
                     }
                 }
                 Some("SUBMIT") => {
@@ -1349,34 +1453,8 @@ impl NetNode {
         // If we're effectively alone (no connected peers), commit immediately so we can make progress
         self.maybe_force_single_node_commit().await;
 
-        let term_now = *self.current_term.read().await;
-        let commit_index = *self.commit_index.read().await;
-        let log_snapshot = self.log.read().await;
-
         for (&peer_id, _) in self.peers.iter() {
-            let next_index = {
-                let next_indices = self.next_index.read().await;
-                next_indices.get(&peer_id).copied().unwrap_or(1)
-            };
-
-            let (prev_log_index, prev_log_term) = Self::prev_ptr(next_index, &log_snapshot);
-            let start_idx = next_index.saturating_sub(1);
-            let start_usize = usize::try_from(start_idx).unwrap_or(0);
-            let entries = if start_usize > log_snapshot.len() {
-                Vec::new()
-            } else {
-                log_snapshot[start_usize..].to_vec()
-            };
-
-            let msg = RaftMessage::AppendEntries {
-                term: term_now,
-                leader_id: self.id,
-                prev_log_index,
-                prev_log_term,
-                entries,
-                leader_commit: commit_index,
-            };
-            self.send_message(peer_id, msg).await;
+            self.send_append_entries(peer_id).await;
         }
     }
 
