@@ -1,22 +1,16 @@
 use clap::{Parser, ValueEnum};
 use rand::{distributions::Alphanumeric, Rng};
-use std::{
-    net::SocketAddr,
-    str::FromStr,
-    time::Duration,
-    fs,
-    path::Path,
-};
+use std::{fs, net::SocketAddr, path::Path, str::FromStr, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    sync::broadcast,
     time::{sleep, timeout},
 };
 use futures::{StreamExt, SinkExt};
 use tokio_tungstenite::accept_async;
 
 use cloud_p2p_raft::crypto::{extract_payload, decrypt_bytes};
-use image::GenericImageView; // (not strictly needed, but fine to keep)
 
 
 #[derive(Parser, Debug)]
@@ -64,6 +58,9 @@ async fn main() -> anyhow::Result<()> {
     println!("🔗 Proxy listening on {}", listen_addr);
     println!("   Using seeds: {:?}", seeds);
 
+    // Broadcast channel for user list updates to WS clients
+    let (ws_tx, _) = broadcast::channel::<String>(32);
+
     loop {
         let (stream, peer) = listener.accept().await?;
         println!("📡 client connected: {}", peer);
@@ -74,6 +71,8 @@ async fn main() -> anyhow::Result<()> {
             max_retries: args.max_retries,
             backoff_ms: args.backoff_ms,
         };
+        let ws_tx = ws_tx.clone();
+        let ws_tx_client = ws_tx.clone();
 
         tokio::spawn(async move {
             // Non-blocking sniff for "GET" to detect WebSocket upgrade; fallback to legacy protocol
@@ -84,10 +83,10 @@ async fn main() -> anyhow::Result<()> {
             };
 
             if is_ws {
-                if let Err(e) = handle_ws(stream, seeds, cfg).await {
+                if let Err(e) = handle_ws(stream, seeds, cfg, ws_tx).await {
                     eprintln!("ws handler error: {e:?}");
                 }
-            } else if let Err(e) = handle_client(stream, seeds, cfg).await {
+            } else if let Err(e) = handle_client(stream, seeds, cfg, ws_tx_client).await {
                 eprintln!("client handler error: {e:?}");
             }
         });
@@ -101,16 +100,32 @@ struct ProxyCfg {
     backoff_ms: u64,
 }
 
-/// WebSocket handler: auto-register on open, auto-unregister on disconnect.
-async fn handle_ws(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg) -> anyhow::Result<()> {
+/// WebSocket handler: auto-register on open, auto-unregister on disconnect; broadcast SHOW_USERS updates.
+async fn handle_ws(
+    stream: TcpStream,
+    seeds: Vec<SocketAddr>,
+    cfg: ProxyCfg,
+    ws_tx: broadcast::Sender<String>,
+) -> anyhow::Result<()> {
     let mut ws = accept_async(stream).await?;
     let mut current_user: Option<String> = None;
     let mut ws_ping = tokio::time::interval(Duration::from_secs(20));
+    // subscribe to broadcasts
+    let mut ws_rx = ws_tx.subscribe();
+
+    if let Ok(list) = query_any(&seeds, "SHOW_USERS").await {
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::Text(list))
+            .await;
+    }
 
     loop {
         tokio::select! {
             _ = ws_ping.tick() => {
                 let _ = ws.send(tokio_tungstenite::tungstenite::Message::Ping(Vec::new())).await;
+            }
+            Ok(msg) = ws_rx.recv() => {
+                let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await;
             }
             Some(msg) = ws.next() => {
                 let msg = match msg {
@@ -124,15 +139,23 @@ async fn handle_ws(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg) -> 
                 if msg.is_text() {
                     let text = msg.into_text()?;
                     let mut parts = text.split_whitespace();
-                    match (parts.next(), parts.next(), parts.next()) {
-                        (Some("REGISTER"), Some(user), Some(ip)) => {
-                            let port = parts.next().unwrap_or("10000");
+                    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                        (Some("REGISTER"), Some(user), Some(ip), Some(port)) => {
+                            current_user = Some(user.to_string());
+                                let op_id = next_op_id();
+                                let payload = format!("SUBMIT {} REGISTER {} {} {}", op_id, user, ip, port);
+                            if let Ok(s) = submit_idempotent(&seeds, &cfg, &payload).await {
+                                let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(s)).await;
+                                broadcast_users(&seeds, &ws_tx).await;
+                            }
+                        }
+                        (Some("UNREGISTER"), Some(user), _, _) => {
                             current_user = Some(user.to_string());
                             let op_id = next_op_id();
-                            let payload = format!("SUBMIT {} REGISTER {} {} {}", op_id, user, ip, port);
-                            let resp = submit_idempotent(&seeds, &cfg, &payload).await;
-                            if let Ok(s) = resp {
+                            let payload = format!("SUBMIT {} UNREGISTER {}", op_id, user);
+                            if let Ok(s) = submit_idempotent(&seeds, &cfg, &payload).await {
                                 let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(s)).await;
+                                broadcast_users(&seeds, &ws_tx).await;
                             }
                         }
                         _ => {
@@ -145,10 +168,29 @@ async fn handle_ws(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg) -> 
         }
     }
 
+    // auto-unregister on close
+    if let Some(user) = current_user {
+        let op_id = next_op_id();
+        let payload = format!("SUBMIT {} UNREGISTER {}", op_id, user);
+        let _ = submit_idempotent(&seeds, &cfg, &payload).await;
+        broadcast_users(&seeds, &ws_tx).await;
+    }
+
     Ok(())
 }
 
-async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg) -> anyhow::Result<()> {
+async fn broadcast_users(seeds: &[SocketAddr], tx: &broadcast::Sender<String>) {
+    if let Ok(list) = query_any(seeds, "SHOW_USERS").await {
+        let _ = tx.send(list);
+    }
+}
+
+async fn handle_client(
+    stream: TcpStream,
+    seeds: Vec<SocketAddr>,
+    cfg: ProxyCfg,
+    ws_tx: broadcast::Sender<String>,
+) -> anyhow::Result<()> {
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     let mut line = String::new();
@@ -187,7 +229,11 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
                 let op_id = next_op_id();
                 let payload = format!("SUBMIT {} REGISTER {} {} {}", op_id, user, ip, port);
                 let resp = submit_idempotent(&seeds, &cfg, &payload).await;
+                let broadcast_needed = resp.as_ref().map(|s| s.starts_with("OK")).unwrap_or(false);
                 write_line(&mut w, resp).await?;
+                if broadcast_needed {
+                    broadcast_users(&seeds, &ws_tx).await;
+                }
             }
 
             "UNREGISTER" => {
@@ -199,10 +245,14 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
                 let op_id = next_op_id();
                 let payload = format!("SUBMIT {} UNREGISTER {}", op_id, user);
                 let resp = submit_idempotent(&seeds, &cfg, &payload).await;
+                let broadcast_needed = resp.as_ref().map(|s| s.starts_with("OK")).unwrap_or(false);
                 write_line(&mut w, resp).await?;
+                if broadcast_needed {
+                    broadcast_users(&seeds, &ws_tx).await;
+                }
             }
 
-            "SHOW_USERS" => {
+            "SHOW_USERS" | "LIST_USERS" => {
                 // read-only; ask any node until success, return raw (multi-line)
                 match query_any(&seeds, "SHOW_USERS").await {
                     Ok(s) => w.write_all(s.as_bytes()).await?,

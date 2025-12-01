@@ -1,5 +1,6 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
 use std::path::Path;
 use tokio::sync::Semaphore;
+use reqwest::Client;
 
 const MAX_LEADER_DURATION: Duration = Duration::from_secs(30);
 const LEADER_COOLDOWN: Duration = Duration::from_secs(15);
@@ -35,7 +37,7 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0")]
     client_host: String,
     /// Base port for client API (actual port = base + node id)
-    #[arg(long, default_value_t = 9000)]
+    #[arg(long, default_value_t = 9000, value_parser = clap::value_parser!(u16).range(1..))]
     client_base_port: u16,
 }
 
@@ -130,6 +132,7 @@ struct NetNode {
     // Hint for who is leader (updated when we receive AppendEntries)
     leader_hint: Arc<RwLock<Option<u32>>>,
     registered_users: Arc<RwLock<HashMap<String, UserEntry>>>,
+    image_metadata: Arc<RwLock<HashMap<String, Value>>>,
     // Idempotency for broadcasted client requests
     processed_ops: Arc<RwLock<std::collections::HashSet<String>>>,
     // Track when we became leader to enforce a max leadership duration
@@ -143,6 +146,7 @@ struct NetNode {
     client_public_addr: SocketAddr,
     // Bounded pool for CPU-heavy crypto tasks
     crypto_workers: Arc<Semaphore>,
+    http_client: Client,
 
 }
 
@@ -181,6 +185,7 @@ impl NetNode {
             match_index: Arc::new(RwLock::new(match_index)),
             leader_hint: Arc::new(RwLock::new(None)),
             registered_users: Arc::new(RwLock::new(HashMap::new())),
+            image_metadata: Arc::new(RwLock::new(HashMap::new())),
             processed_ops: Arc::new(RwLock::new(std::collections::HashSet::new())),
             leader_since: Arc::new(RwLock::new(None)),
             leader_cooldown_until: Arc::new(RwLock::new(None)),
@@ -188,6 +193,7 @@ impl NetNode {
             client_listen_addr,
             client_public_addr,
             crypto_workers: Arc::new(Semaphore::new(MAX_CRYPTO_WORKERS)),
+            http_client: Client::new(),
         }
     }
 
@@ -850,6 +856,7 @@ impl NetNode {
         info!("Node {} rebuilding state from {} committed entries", self.id, commit_index);
 
         self.registered_users.write().await.clear();
+        self.image_metadata.write().await.clear();
 
         for i in 0..commit_index {
             if let Some(entry) = log.get(i as usize) {
@@ -940,6 +947,12 @@ impl NetNode {
                                     last_seen: Self::now_nanos(),
                                 });
                                 info!("Node {}: Applied REGISTER {} {}", self.id, user, ip);
+                                let node = self.clone();
+                                let user_s = user.to_string();
+                                let ip_s = ip.to_string();
+                                tokio::spawn(async move {
+                                    node.sync_user_metadata(&user_s, &ip_s, port).await;
+                                });
                             } else {
                                 info!("Node {}: Malformed REGISTER command '{}'", self.id, entry.command);
                             }
@@ -1037,9 +1050,6 @@ impl NetNode {
                                 error!("Node {}: malformed ENCRYPT_IMAGE command '{}'", self.id, entry.command);
                             }
                         }
-                        Some(other) => {
-                            info!("Node {}: Unknown command '{}'", self.id, other);
-                        }
                         Some("SET_P2P_PORT") => {
                             if let (Some(user), Some(port_s)) = (parts.next(), parts.next()) {
                                 let p2p_port: u16 = port_s.parse().unwrap_or(10000);
@@ -1057,6 +1067,9 @@ impl NetNode {
                             } else {
                                 info!("Node {}: Malformed SET_P2P_PORT command '{}'", self.id, entry.command);
                             }
+                        }
+                        Some(other) => {
+                            info!("Node {}: Unknown command '{}'", self.id, other);
                         }
                         None => {}
                     }
@@ -1115,9 +1128,6 @@ impl NetNode {
             if !matches!(*self.state.read().await, RaftState::Leader) {
                 continue;
             }
-            let term = *self.current_term.read().await;
-            let commit_index = *self.commit_index.read().await;
-            let log = self.log.read().await;
             
             // Apply any newly committed entries
             self.apply_committed_entries().await;
@@ -1240,7 +1250,7 @@ impl NetNode {
         let mut line = String::new();
 
         w.write_all(b"Welcome to Cloud P2P Node API!\n").await?;
-        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> [p2p_port] | UNREGISTER <user> | SET_P2P_PORT <user> <port> | LIST | SHOW_USERS | LIST_PEERS | SUBMIT <op_id> <command...> | ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
+        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> [p2p_port] | UNREGISTER <user> | SET_P2P_PORT <user> <port> | LIST | SHOW_USERS | LIST_USERS | LIST_PEERS | SUBMIT <op_id> <command...> | ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
 
         loop {
             line.clear();
@@ -1285,19 +1295,19 @@ impl NetNode {
                     let user = match parts.next() {
                         Some(s) => s.to_string(),
                         None => {
-                            w.write_all(b"Usage: REGISTER <user> <ip>\n").await?;
+                            w.write_all(b"Usage: REGISTER <user> <ip> [p2p_port]\n").await?;
                             continue;
                         }
                     };
                     let ip = match parts.next() {
                         Some(s) => s.to_string(),
                         None => {
-                            w.write_all(b"Usage: REGISTER <user> <ip>\n").await?;
+                            w.write_all(b"Usage: REGISTER <user> <ip> [p2p_port]\n").await?;
                             continue;
                         }
                     };
-
-                    let command = format!("REGISTER {} {}", user, ip);
+                    let port_s = parts.next().unwrap_or("10000").to_string();
+                    let command = format!("REGISTER {} {} {}", user, ip, port_s);
                     self.append_and_replicate(command).await;
                     w.write_all(b"OK\n").await?;
                 }
@@ -1380,7 +1390,7 @@ impl NetNode {
                     }
                 }
                 
-                Some("SHOW_USERS") => {
+                Some("SHOW_USERS") | Some("LIST_USERS") => {
                     if !is_leader {
                         // forward to the leader so you always see the leader’s authoritative state
                         match self.forward_to_leader("SHOW_USERS").await {
@@ -1569,6 +1579,43 @@ impl NetNode {
                 "Node {} solo-committing up to index {} (no connected peers)",
                 self.id, last_index
             );
+        }
+    }
+
+    async fn sync_user_metadata(&self, user: &str, ip: &str, p2p_port: u16) {
+        if ip.is_empty() {
+            return;
+        }
+        let url = format!(
+            "http://{}:{}/list-images?requester={}",
+            ip, p2p_port, user
+        );
+        let client = self.http_client.clone();
+        let resp = client
+            .get(url)
+            .timeout(Duration::from_secs(4))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => match r.json::<Value>().await {
+                Ok(json) => {
+                    self.image_metadata
+                        .write()
+                        .await
+                        .insert(user.to_string(), json);
+                    info!("Node {} synced image metadata for {}", self.id, user);
+                }
+                Err(e) => {
+                    error!(
+                        "Node {} failed to parse metadata for {}: {}",
+                        self.id, user, e
+                    );
+                }
+            },
+            Err(e) => {
+                error!("Node {} failed to sync metadata for {}: {}", self.id, user, e);
+            }
         }
     }
 }

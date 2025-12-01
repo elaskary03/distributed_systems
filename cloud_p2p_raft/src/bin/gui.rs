@@ -315,16 +315,29 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
               <label>Image ID</label>
               <input id="peerImageId" type="text" placeholder="img-...">
             </div>
+            <div>
+              <label>Requested Views</label>
+              <input id="peerViews" type="number" value="1" min="1">
+            </div>
           </div>
           <div class="btns" style="margin-top:8px">
             <button id="peerListBtn">LIST_IMAGES</button>
             <button id="peerPreviewBtn">PREVIEW</button>
             <button id="peerFullBtn">FULL</button>
+            <button id="peerRequestBtn">REQUEST_IMAGE</button>
           </div>
           <div id="peerOut" class="out"></div>
           <div style="margin-top:8px">
             <img id="peerImg" style="max-width:100%; display:none; border:1px solid var(--border); border-radius:8px;" />
           </div>
+        </section>
+        <section id="owner-requests" style="display:none;">
+          <h2>📬 Pending Requests (Owner)</h2>
+          <div class="btns" style="margin-bottom:8px">
+            <button id="listRequestsBtn">LIST_REQUESTS</button>
+          </div>
+          <div id="requestCount" class="hint"></div>
+          <div id="requestsList" class="out"></div>
         </section>
       </div>
 
@@ -362,6 +375,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let presenceWs = null;
     let currentUser = "";
     let currentIp = "";
+    let cachedUsersList = "";
+    let manualLogout = false;
+    let pendingCache = [];
 
     // Maintain a websocket presence session. Server auto-unregisters on disconnect.
     function connectPresence() {
@@ -373,10 +389,26 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
       presenceWs = new WebSocket(WS_URL);
       presenceWs.onopen = () => {
+        manualLogout = false;
         try { presenceWs.send(`REGISTER ${currentUser} ${currentIp} ${DEFAULT_P2P_PORT}`); } catch (e) { console.error(e); }
       };
+      presenceWs.onmessage = (evt) => {
+        if (typeof evt.data === 'string') {
+          cachedUsersList = evt.data;
+          text('#usersOut', evt.data);
+        }
+      };
       presenceWs.onclose = () => {
-        // No auto-reconnect; only reconnect when user explicitly connects again
+        presenceWs = null;
+        if (manualLogout) { manualLogout = false; return; }
+        cachedUsersList = "";
+        clearOutputs();
+        currentUser = "";
+        currentIp = "";
+        showMainUI(false);
+        document.getElementById('sessionLabel').textContent = 'Logged in as: -';
+        text('#loginOut', 'Connection closed. Please log in again.');
+        document.getElementById('loginOut').style.display = 'block';
       };
       presenceWs.onerror = (e) => {
         console.error('ws error', e);
@@ -432,7 +464,12 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       clearOutputs();
       connectPresence();
       // Pull initial user list
-      try { text('#usersOut', await (await fetch('/api/users')).text()); } catch (_) {}
+      try {
+        const list = await (await fetch('/api/users')).text();
+        cachedUsersList = list;
+        text('#usersOut', list);
+      } catch (_) {}
+      await refreshOwnerRequests();
     });
 
     /* Upload & ENCRYPT_ON_CLOUD */
@@ -460,7 +497,11 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             fdUpload.append('permissions', JSON.stringify({}));
             fdUpload.append('file', new File([pngBlob], fileBase, { type: 'image/png' }));
 
-            const p2pUrl = `http://${currentIp}:${DEFAULT_P2P_PORT}/upload-image`;
+            let uploadTarget = null;
+            try { uploadTarget = await resolvePeer(currentUser); } catch (_) {}
+            const p2pIp = uploadTarget?.ip || currentIp;
+            const p2pPort = uploadTarget?.port || DEFAULT_P2P_PORT;
+            const p2pUrl = `http://${p2pIp}:${p2pPort}/upload-image`;
             await fetch(p2pUrl, { method: 'POST', body: fdUpload });
 
             // Download locally for user convenience
@@ -480,7 +521,11 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
     /* SHOW_USERS */
     $('#usersBtn').addEventListener('click', async () => {
-      try { text('#usersOut', await (await fetch('/api/users')).text()); }
+      try {
+        const list = await (await fetch('/api/users')).text();
+        cachedUsersList = list;
+        text('#usersOut', list);
+      }
       catch (err) { text('#usersOut', String(err)); }
     });
 
@@ -503,8 +548,12 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     });
 
     async function resolvePeer(name) {
-      const resp = await fetch('/api/users');
-      const body = await resp.text();
+      let body = cachedUsersList;
+      if (!body) {
+        const resp = await fetch('/api/users');
+        body = await resp.text();
+        cachedUsersList = body;
+      }
       const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
       for (const l of lines) {
         const parts = l.split(/\s+/);
@@ -526,6 +575,49 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       return { ct, buf };
     }
 
+    async function refreshOwnerRequests() {
+      if (!currentUser || !currentIp) { return; }
+      try {
+        const url = `http://${currentIp}:${DEFAULT_P2P_PORT}/list-images?requester=${encodeURIComponent(currentUser)}`;
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        const pending = [];
+        for (const img of data.images || []) {
+          if (img.owner === currentUser && Array.isArray(img.pending_requests)) {
+            for (const req of img.pending_requests) {
+              pending.push({ image: img.id, viewer: req.viewer, requested: req.requested_views });
+            }
+          }
+        }
+        pendingCache = pending;
+        text('#requestCount', `${pending.length} pending request(s)`);
+        renderRequests();
+        document.getElementById('owner-requests').style.display = 'block';
+      } catch (_) {}
+    }
+
+    function renderRequests() {
+      const container = document.getElementById('requestsList');
+      if (!pendingCache.length) {
+        container.textContent = 'No pending requests';
+        return;
+      }
+      container.innerHTML = pendingCache.map((req, idx) => {
+        return `
+        <div class="req" data-img="${req.image}" data-viewer="${req.viewer}">
+          <div><strong>Image:</strong> ${req.image}</div>
+          <div><strong>Viewer:</strong> ${req.viewer}</div>
+          <div><strong>Requested:</strong> ${req.requested}</div>
+          <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
+            <input type="number" id="approve-${idx}" value="${req.requested}" min="1" style="width:90px;">
+            <button class="approve-btn" data-idx="${idx}">Approve</button>
+            <button class="reject-btn" data-idx="${idx}">Reject</button>
+          </div>
+        </div>`;
+      }).join('\n');
+    }
+
     /* P2P actions */
     $('#peerListBtn').addEventListener('click', async () => {
       const peer = ($('#peerUser').value || '').trim();
@@ -535,7 +627,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
         const url = `http://${info.ip}:${info.port}/list-images?requester=${encodeURIComponent(currentUser)}`;
         const res = await fetch(url);
-        text('#peerOut', await res.text());
+        const json = await res.json();
+        const rendered = JSON.stringify(json, null, 2);
+        text('#peerOut', rendered);
       } catch (err) { text('#peerOut', String(err)); }
     });
 
@@ -567,15 +661,78 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const info = await resolvePeer(peer);
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
         const url = `http://${info.ip}:${info.port}/full/${encodeURIComponent(imgId)}?requester=${encodeURIComponent(currentUser)}`;
-        const { ct, buf } = await fetchBinary(url);
+        const res = await fetch(url);
+        const ct = res.headers.get('content-type') || '';
         if (ct.startsWith('image/')) {
-          const blob = new Blob([buf], { type: ct });
-          const obj = URL.createObjectURL(blob);
-          const img = $('#peerImg'); img.style.display = 'block'; img.src = obj;
-          text('#peerOut', `Full image from ${peer}/${imgId}`);
+          const blob = await res.blob();
+          const cd = res.headers.get('content-disposition') || '';
+          let fname = `${imgId}.png`;
+          const m = cd.match(/filename="([^"]+)"/i);
+          if (m) fname = m[1];
+          const dl = document.createElement('a');
+          dl.href = URL.createObjectURL(blob);
+          dl.download = fname;
+          dl.click();
+          URL.revokeObjectURL(dl.href);
+          text('#peerOut', `Downloaded encrypted image ${fname}. Decrypt via the decrypt tool.`);
         } else {
-          text('#peerOut', `Full response: ${ct}`);
+          const textResp = await res.text();
+          text('#peerOut', textResp);
         }
+      } catch (err) { text('#peerOut', String(err)); }
+    });
+
+    $('#listRequestsBtn').addEventListener('click', async () => {
+      await refreshOwnerRequests();
+    });
+
+    document.getElementById('requestsList').addEventListener('click', async (e) => {
+      const btn = e.target;
+      if (btn.classList.contains('approve-btn')) {
+        const idx = parseInt(btn.dataset.idx || '-1', 10);
+        const req = pendingCache[idx];
+        if (!req) return;
+        const input = document.getElementById(`approve-${idx}`);
+        const approved = parseInt((input?.value || '0'), 10);
+        if (!approved || approved <= 0) { text('#requestsList', 'Approved views must be positive'); return; }
+        const url = `http://${currentIp}:${DEFAULT_P2P_PORT}/approve-request/${encodeURIComponent(req.image)}`;
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requester: req.viewer, views: approved }),
+        });
+        await refreshOwnerRequests();
+      } else if (btn.classList.contains('reject-btn')) {
+        const idx = parseInt(btn.dataset.idx || '-1', 10);
+        const req = pendingCache[idx];
+        if (!req) return;
+        const url = `http://${currentIp}:${DEFAULT_P2P_PORT}/reject-request/${encodeURIComponent(req.image)}`;
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requester: req.viewer, views: 0 }),
+        });
+        await refreshOwnerRequests();
+      }
+    });
+
+    $('#peerRequestBtn').addEventListener('click', async () => {
+      const peer = ($('#peerUser').value || '').trim();
+      const imgId = ($('#peerImageId').value || '').trim();
+      const views = parseInt($('#peerViews').value || '0', 10);
+      if (!peer || !imgId || !currentUser) { text('#peerOut', 'peer, image_id, and login required'); return; }
+      if (views <= 0) { text('#peerOut', 'views must be positive'); return; }
+      try {
+        const info = await resolvePeer(peer);
+        if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
+        const url = `http://${info.ip}:${info.port}/request-image/${encodeURIComponent(imgId)}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requester: currentUser, views }),
+        });
+        text('#peerOut', await res.text());
+        await refreshOwnerRequests();
       } catch (err) { text('#peerOut', String(err)); }
     });
 
@@ -591,10 +748,16 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       } catch (_) {}
       currentUser = "";
       currentIp = "";
+      cachedUsersList = "";
+      manualLogout = true;
       if (presenceWs) { try { presenceWs.close(); } catch (_) {} presenceWs = null; }
       clearOutputs();
       showMainUI(false);
       document.getElementById('sessionLabel').textContent = 'Logged in as: -';
+      pendingCache = [];
+      text('#requestsList', '');
+      text('#requestCount', '');
+      document.getElementById('owner-requests').style.display = 'none';
     });
 
     /* Client-side Decrypt */
