@@ -496,11 +496,22 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             // fetch the stego PNG
             const pngResp = await fetch(stegoPath);
             const pngBlob = await pngResp.blob();
+            // fetch original for preview
+            let previewBlob = null;
+            if (json.original_path) {
+              try {
+                const origResp = await fetch(json.original_path);
+                previewBlob = await origResp.blob();
+              } catch (_) {}
+            }
             const fdUpload = new FormData();
             fdUpload.append('image_id', imageId);
             fdUpload.append('owner', currentUser);
             fdUpload.append('permissions', JSON.stringify({}));
             fdUpload.append('file', new File([pngBlob], fileBase, { type: 'image/png' }));
+            if (previewBlob) {
+              fdUpload.append('preview', new File([previewBlob], `preview-${fileBase}`, { type: 'image/png' }));
+            }
 
             let uploadTarget = null;
             try { uploadTarget = await resolvePeer(currentUser); } catch (_) {}
@@ -552,24 +563,39 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       catch (err) { text('#leaderOut', String(err)); }
     });
 
-    async function resolvePeer(name) {
-      let body = cachedUsersList;
-      if (!body) {
+    async function ensureUsersList() {
+      if (!cachedUsersList) {
         const resp = await fetch('/api/users');
-        body = await resp.text();
-        cachedUsersList = body;
+        cachedUsersList = await resp.text();
       }
+      return cachedUsersList;
+    }
+
+    function parseUsers(body) {
       const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
-      for (const l of lines) {
-        const parts = l.split(/\s+/);
-        if (parts.length >= 5) {
-          const [u, ip, port, online] = [parts[0], parts[1], parts[2], parts[3]];
-          if (u === name && online === 'true' && ip) {
-            return { ip, port: parseInt(port, 10) || DEFAULT_P2P_PORT };
-          }
-        }
-      }
-      return null;
+      return lines
+        .map(l => {
+          const parts = l.split(/\s+/);
+          if (parts.length < 5) return null;
+          const [user, ip, port, online] = [parts[0], parts[1], parts[2], parts[3]];
+          return {
+            user,
+            ip,
+            port: parseInt(port, 10) || DEFAULT_P2P_PORT,
+            online: online === 'true',
+          };
+        })
+        .filter(Boolean);
+    }
+
+    async function getOnlinePeers() {
+      const body = await ensureUsersList();
+      return parseUsers(body).filter(u => u.online && !!u.ip);
+    }
+
+    async function resolvePeer(name) {
+      const peers = await getOnlinePeers();
+      return peers.find(p => p.user === name) || null;
     }
 
     async function fetchBinary(url) {
@@ -625,16 +651,27 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
     /* P2P actions */
     $('#peerListBtn').addEventListener('click', async () => {
-      const peer = ($('#peerUser').value || '').trim();
-      if (!peer) { text('#peerOut', 'peer username required'); return; }
       try {
-        const info = await resolvePeer(peer);
-        if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
-        const url = `http://${info.ip}:${info.port}/list-images?requester=${encodeURIComponent(currentUser)}`;
-        const res = await fetch(url);
-        const json = await res.json();
-        const rendered = JSON.stringify(json, null, 2);
-        text('#peerOut', rendered);
+        const peers = await getOnlinePeers();
+        if (!peers.length) { text('#peerOut', 'no online peers found'); return; }
+        const results = [];
+        for (const peer of peers) {
+          const url = `http://${peer.ip}:${peer.port}/list-images?requester=${encodeURIComponent(currentUser || '')}`;
+          try {
+            const res = await fetch(url);
+            const json = await res.json();
+            // Only surface images actually owned by the peer; otherwise the list becomes confusing
+            const images = (json.images || []).filter(img => img.owner === peer.user);
+            results.push({
+              user: peer.user,
+              images,
+              status: images.length ? (json.status || 'ok') : 'no images for this user',
+            });
+          } catch (err) {
+            results.push({ user: peer.user, error: String(err) });
+          }
+        }
+        text('#peerOut', JSON.stringify(results, null, 2));
       } catch (err) { text('#peerOut', String(err)); }
     });
 

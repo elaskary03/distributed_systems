@@ -108,6 +108,7 @@ async fn upload_image(
     let mut owner = None;
     let mut permissions_raw: Option<String> = None;
     let mut image_bytes: Option<Vec<u8>> = None;
+    let mut preview_bytes: Option<Vec<u8>> = None;
 
     while let Ok(Some(field)) = mp.next_field().await {
         let name = field.name().unwrap_or("").to_string();
@@ -118,6 +119,11 @@ async fn upload_image(
             "file" => {
                 if let Ok(bytes) = field.bytes().await {
                     image_bytes = Some(bytes.to_vec());
+                }
+            }
+            "preview" => {
+                if let Ok(bytes) = field.bytes().await {
+                    preview_bytes = Some(bytes.to_vec());
                 }
             }
             _ => {}
@@ -132,10 +138,16 @@ async fn upload_image(
         Some(v) if !v.is_empty() => v,
         _ => st.owner.clone(),
     };
-    let img = match image_bytes {
+    let stego_bytes = match image_bytes {
         Some(b) => b,
         None => return (StatusCode::BAD_REQUEST, "missing file").into_response(),
     };
+
+    // Prefer the provided preview/original bytes for "original" storage and previews;
+    // fall back to the uploaded file if none were provided.
+    let original_bytes = preview_bytes
+        .clone()
+        .unwrap_or_else(|| stego_bytes.clone());
 
     let owner_paths = match ensure_owner_paths(&st.base, &owner).await {
         Ok(p) => p,
@@ -149,7 +161,7 @@ async fn upload_image(
     };
     let base_perms: Option<HashMap<String, i64>> = permissions_raw
         .and_then(|s| serde_json::from_str(&s).ok());
-    let mut meta = extract_metadata_from_png(&img, &owner)
+    let mut meta = extract_metadata_from_png(&stego_bytes, &owner)
         .unwrap_or_else(|_| default_metadata(&owner, base_perms.clone()));
     if let Some(p) = base_perms {
         meta.permissions = p;
@@ -158,8 +170,8 @@ async fn upload_image(
     ensure_owner_default_perm(&mut meta);
     meta.last_update_ns = now_nanos();
 
-    // Save original
-    if let Err(e) = save_image(&owner_paths.original, &image_id, &img).await {
+    // Save original (use provided preview/original bytes when available)
+    if let Err(e) = save_image(&owner_paths.original, &image_id, &original_bytes).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("save original: {e}"),
@@ -167,7 +179,12 @@ async fn upload_image(
             .into_response();
     }
 
-    let stego = match embed_metadata_into_png(&img, &meta) {
+    // Save preview derived from the original (never from the encrypted payload)
+    if let Err(e) = save_preview_image(&owner_paths.original, &image_id, &original_bytes).await {
+        eprintln!("preview save failed for {}: {}", image_id, e);
+    }
+
+    let stego = match embed_metadata_into_png(&stego_bytes, &meta) {
         Ok(b) => b,
         Err(e) => {
             return (
@@ -201,51 +218,46 @@ async fn list_images(
         .map(|r| r == &st.owner)
         .unwrap_or(false);
     let mut images = Vec::new();
-    if let Ok(mut owners) = fs::read_dir(&st.base).await {
-        while let Ok(Some(owner_dir)) = owners.next_entry().await {
-            if !owner_dir.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+    // Only list images belonging to this server's owner to avoid leaking other users' data
+    let owner_dir = st.base.join(&st.owner);
+    let enc_dir = owner_dir.join("encrypted");
+    let meta_dir = owner_dir.join("meta");
+    if let Ok(mut rd) = fs::read_dir(&enc_dir).await {
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            if entry.path().extension().and_then(|s| s.to_str()) != Some("png") {
                 continue;
             }
-            let enc_dir = owner_dir.path().join("encrypted");
-            let meta_dir = owner_dir.path().join("meta");
-            if let Ok(mut rd) = fs::read_dir(&enc_dir).await {
-                while let Ok(Some(entry)) = rd.next_entry().await {
-                    if entry.path().extension().and_then(|s| s.to_str()) != Some("png") {
-                        continue;
-                    }
-                    let id = match entry
-                        .path()
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                    {
-                        Some(v) => v,
-                        None => continue,
-                    };
-                    if let Ok(mut meta) = load_metadata(&enc_dir, &id).await {
-                        if meta.owner.is_empty() {
-                            meta.owner = owner_dir.file_name().to_string_lossy().to_string();
-                        }
-                        let remaining = requester
-                            .as_ref()
-                            .and_then(|r| meta.permissions.get(r))
-                            .copied()
-                            .unwrap_or(0);
-                        let mut obj = json!({
-                            "id": id,
-                            "owner": meta.owner,
-                            "permissions": meta.permissions,
-                            "remaining_views_for_requester": remaining,
-                            "last_update_ns": meta.last_update_ns
-                        });
-                        if is_owner && meta.owner == st.owner {
-                            if let Ok(reqs) = load_pending_requests(&meta_dir, &id).await {
-                                obj["pending_requests"] = serde_json::to_value(reqs).unwrap_or(json!([]));
-                            }
-                        }
-                        images.push(obj);
+            let id = match entry
+                .path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+            {
+                Some(v) => v,
+                None => continue,
+            };
+            if let Ok(mut meta) = load_metadata(&enc_dir, &id).await {
+                if meta.owner.is_empty() {
+                    meta.owner = st.owner.clone();
+                }
+                let remaining = requester
+                    .as_ref()
+                    .and_then(|r| meta.permissions.get(r))
+                    .copied()
+                    .unwrap_or(0);
+                let mut obj = json!({
+                    "id": id,
+                    "owner": meta.owner,
+                    "permissions": meta.permissions,
+                    "remaining_views_for_requester": remaining,
+                    "last_update_ns": meta.last_update_ns
+                });
+                if is_owner && meta.owner == st.owner {
+                    if let Ok(reqs) = load_pending_requests(&meta_dir, &id).await {
+                        obj["pending_requests"] = serde_json::to_value(reqs).unwrap_or(json!([]));
                     }
                 }
+                images.push(obj);
             }
         }
     }
@@ -255,28 +267,28 @@ async fn list_images(
 async fn preview_image(
     State(st): State<AppState>,
     AxumPath(image_id): AxumPath<String>,
-) -> impl axum::response::IntoResponse {
+) -> impl IntoResponse {
+    // resolve owner paths (original, encrypted, meta)
     let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
-    let img_bytes = match load_image(&paths.original, &image_id).await {
-        Ok(b) => b,
-        Err(_) => match load_image(&paths.encrypted, &image_id).await {
-            Ok(b) => b,
-            Err(_) => return StatusCode::NOT_FOUND.into_response(),
-        },
-    };
-    let img = match image::load_from_memory(&img_bytes) {
-        Ok(i) => i,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let preview = resize_to_width(img, 200);
-    let mut buf = Vec::new();
-    if preview
-        .write_to(&mut std::io::Cursor::new(&mut buf), ImageOutputFormat::Png)
-        .is_err()
-    {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+
+    // 1) if preview exists, use it
+    if let Ok(bytes) = load_preview_image(&paths.original, &image_id).await {
+        return (StatusCode::OK, [("content-type", "image/png")], bytes).into_response();
     }
-    (StatusCode::OK, [("content-type", "image/png")], buf).into_response()
+
+    // 2) otherwise, create preview from ORIGINAL ONLY
+    match load_image(&paths.original, &image_id).await {
+        Ok(orig) => {
+            match make_preview_bytes(&orig) {
+                Ok(resized) => {
+                    return (StatusCode::OK, [("content-type", "image/png")], resized)
+                        .into_response();
+                }
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn full_image(
@@ -517,6 +529,11 @@ async fn load_image(root: &PathBuf, id: &str) -> Result<Vec<u8>, anyhow::Error> 
     Ok(fs::read(path).await?)
 }
 
+async fn load_preview_image(root: &PathBuf, id: &str) -> Result<Vec<u8>, anyhow::Error> {
+    let path = root.join(format!("{}_preview.png", id));
+    Ok(fs::read(path).await?)
+}
+
 async fn save_image(root: &PathBuf, id: &str, bytes: &[u8]) -> Result<(), anyhow::Error> {
     let path = root.join(format!("{}.png", id));
     fs::write(path, bytes).await?;
@@ -679,6 +696,21 @@ fn extract_metadata_from_png(img_bytes: &[u8], owner_hint: &str) -> anyhow::Resu
         return Ok(Metadata { owner: owner_hint.to_string(), ..meta });
     }
     Ok(meta)
+}
+
+fn make_preview_bytes(img_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let img = image::load_from_memory(img_bytes)?;
+    let preview = resize_to_width(img, 200);
+    let mut buf = Vec::new();
+    preview.write_to(&mut std::io::Cursor::new(&mut buf), ImageOutputFormat::Png)?;
+    Ok(buf)
+}
+
+async fn save_preview_image(root: &PathBuf, id: &str, img_bytes: &[u8]) -> anyhow::Result<()> {
+    let preview = make_preview_bytes(img_bytes)?;
+    let path = root.join(format!("{}_preview.png", id));
+    fs::write(path, preview).await?;
+    Ok(())
 }
 
 fn get_data_dir() -> PathBuf {
