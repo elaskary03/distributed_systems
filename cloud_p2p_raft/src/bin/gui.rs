@@ -302,7 +302,33 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         </section>
       </div>
 
-      <!-- Third row: Client-side Decrypt -->
+      <!-- Third row: P2P Image Sharing -->
+      <div class="grid">
+        <section>
+          <h2>🤝 P2P Image Sharing</h2>
+          <div class="row">
+            <div>
+              <label>Peer Username</label>
+              <input id="peerUser" type="text" placeholder="peer-username">
+            </div>
+            <div>
+              <label>Image ID</label>
+              <input id="peerImageId" type="text" placeholder="img-...">
+            </div>
+          </div>
+          <div class="btns" style="margin-top:8px">
+            <button id="peerListBtn">LIST_IMAGES</button>
+            <button id="peerPreviewBtn">PREVIEW</button>
+            <button id="peerFullBtn">FULL</button>
+          </div>
+          <div id="peerOut" class="out"></div>
+          <div style="margin-top:8px">
+            <img id="peerImg" style="max-width:100%; display:none; border:1px solid var(--border); border-radius:8px;" />
+          </div>
+        </section>
+      </div>
+
+      <!-- Fourth row: Client-side Decrypt -->
       <div class="grid">
         <section>
           <h2>🗝️ Decrypt Local Image <span class="badge">client-side</span></h2>
@@ -359,7 +385,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     }
 
     function clearOutputs() {
-      ['uploadOut','usersOut','peersOut','listOut','leaderOut','decryptOut','loginOut'].forEach(id => text('#'+id, ''));
+      ['uploadOut','usersOut','peersOut','listOut','leaderOut','decryptOut','loginOut','peerOut'].forEach(id => text('#'+id, ''));
+      const img = $('#peerImg'); if (img) { img.style.display = 'none'; img.src = ''; }
     }
 
     function showMainUI(show) {
@@ -422,12 +449,29 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const imageId = json.image_id;
         const stegoPath = await pollFindStego(imageId);
         if (stegoPath) {
-          const a = document.createElement('a');
-          a.href = stegoPath;
           const fileBase = stegoPath.split('/').pop() || `stego-${imageId}.png`;
-          a.download = fileBase;
-          a.click();
-          text('#uploadOut', JSON.stringify(json, null, 2) + `\n✅ Stego downloaded: ${fileBase}`);
+          try {
+            // fetch the stego PNG
+            const pngResp = await fetch(stegoPath);
+            const pngBlob = await pngResp.blob();
+            const fdUpload = new FormData();
+            fdUpload.append('image_id', imageId);
+            fdUpload.append('owner', currentUser);
+            fdUpload.append('permissions', JSON.stringify({}));
+            fdUpload.append('file', new File([pngBlob], fileBase, { type: 'image/png' }));
+
+            const p2pUrl = `http://${currentIp}:${DEFAULT_P2P_PORT}/upload-image`;
+            await fetch(p2pUrl, { method: 'POST', body: fdUpload });
+
+            // Download locally for user convenience
+            const a = document.createElement('a');
+            a.href = stegoPath;
+            a.download = fileBase;
+            a.click();
+            text('#uploadOut', JSON.stringify(json, null, 2) + `\n✅ Stego saved to P2P server and downloaded: ${fileBase}`);
+          } catch (err) {
+            text('#uploadOut', JSON.stringify(json, null, 2) + `\n⚠️ Stego fetched, but P2P upload failed: ${err}`);
+          }
         } else {
           text('#uploadOut', JSON.stringify(json, null, 2) + `\n⚠️ Stego not found yet for ${imageId}`);
         }
@@ -456,6 +500,83 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     $('#leaderBtn').addEventListener('click', async () => {
       try { text('#leaderOut', await (await fetch('/api/leader')).text()); }
       catch (err) { text('#leaderOut', String(err)); }
+    });
+
+    async function resolvePeer(name) {
+      const resp = await fetch('/api/users');
+      const body = await resp.text();
+      const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
+      for (const l of lines) {
+        const parts = l.split(/\s+/);
+        if (parts.length >= 5) {
+          const [u, ip, port, online] = [parts[0], parts[1], parts[2], parts[3]];
+          if (u === name && online === 'true' && ip) {
+            return { ip, port: parseInt(port, 10) || DEFAULT_P2P_PORT };
+          }
+        }
+      }
+      return null;
+    }
+
+    async function fetchBinary(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const ct = res.headers.get('content-type') || '';
+      const buf = await res.arrayBuffer();
+      return { ct, buf };
+    }
+
+    /* P2P actions */
+    $('#peerListBtn').addEventListener('click', async () => {
+      const peer = ($('#peerUser').value || '').trim();
+      if (!peer) { text('#peerOut', 'peer username required'); return; }
+      try {
+        const info = await resolvePeer(peer);
+        if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
+        const url = `http://${info.ip}:${info.port}/list-images?requester=${encodeURIComponent(currentUser)}`;
+        const res = await fetch(url);
+        text('#peerOut', await res.text());
+      } catch (err) { text('#peerOut', String(err)); }
+    });
+
+    $('#peerPreviewBtn').addEventListener('click', async () => {
+      const peer = ($('#peerUser').value || '').trim();
+      const imgId = ($('#peerImageId').value || '').trim();
+      if (!peer || !imgId) { text('#peerOut', 'peer username and image_id required'); return; }
+      try {
+        const info = await resolvePeer(peer);
+        if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
+        const url = `http://${info.ip}:${info.port}/preview/${encodeURIComponent(imgId)}`;
+        const { ct, buf } = await fetchBinary(url);
+        if (ct.startsWith('image/')) {
+          const blob = new Blob([buf], { type: ct });
+          const obj = URL.createObjectURL(blob);
+          const img = $('#peerImg'); img.style.display = 'block'; img.src = obj;
+          text('#peerOut', `Preview from ${peer}/${imgId}`);
+        } else {
+          text('#peerOut', `Preview response: ${ct}`);
+        }
+      } catch (err) { text('#peerOut', String(err)); }
+    });
+
+    $('#peerFullBtn').addEventListener('click', async () => {
+      const peer = ($('#peerUser').value || '').trim();
+      const imgId = ($('#peerImageId').value || '').trim();
+      if (!peer || !imgId) { text('#peerOut', 'peer username and image_id required'); return; }
+      try {
+        const info = await resolvePeer(peer);
+        if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
+        const url = `http://${info.ip}:${info.port}/full/${encodeURIComponent(imgId)}?requester=${encodeURIComponent(currentUser)}`;
+        const { ct, buf } = await fetchBinary(url);
+        if (ct.startsWith('image/')) {
+          const blob = new Blob([buf], { type: ct });
+          const obj = URL.createObjectURL(blob);
+          const img = $('#peerImg'); img.style.display = 'block'; img.src = obj;
+          text('#peerOut', `Full image from ${peer}/${imgId}`);
+        } else {
+          text('#peerOut', `Full response: ${ct}`);
+        }
+      } catch (err) { text('#peerOut', String(err)); }
     });
 
     /* Go Offline */
