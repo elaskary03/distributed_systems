@@ -57,8 +57,9 @@ pub struct LogEntry {
 pub struct UserEntry {
     pub username: String,
     pub ip: String,
-    pub status: String,
-    pub last_seen: u64,
+    pub p2p_port: u16,
+    pub online: bool,
+    pub last_seen: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +207,15 @@ impl NetNode {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64
+    }
+
+    #[inline]
+    fn now_nanos() -> u128 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
     }
 
     #[inline]
@@ -846,13 +856,18 @@ impl NetNode {
                 let mut parts = entry.command.split_whitespace();
                 match parts.next() {
                     Some("REGISTER") => {
-                        if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
+                        let user = parts.next();
+                        let ip = parts.next();
+                        let port = parts.next();
+                        if let (Some(user), Some(ip)) = (user, ip) {
+                            let p2p_port: u16 = port.unwrap_or("10000").parse().unwrap_or(10000);
                             let mut map = self.registered_users.write().await;
                             map.insert(user.to_string(), UserEntry {
                                 username: user.to_string(),
                                 ip: ip.to_string(),
-                                status: "online".to_string(),
-                                last_seen: Self::now_millis(),
+                                p2p_port,
+                                online: true,
+                                last_seen: Self::now_nanos(),
                             });
                         }
                     }
@@ -860,17 +875,33 @@ impl NetNode {
                         if let Some(user) = parts.next() {
                             let mut map = self.registered_users.write().await;
                             if let Some(entry) = map.get_mut(user) {
-                                entry.status = "offline".to_string();
+                                entry.online = false;
                                 entry.ip.clear();
-                                entry.last_seen = Self::now_millis();
+                                entry.last_seen = Self::now_nanos();
                             } else {
                                 map.insert(user.to_string(), UserEntry {
                                     username: user.to_string(),
                                     ip: String::new(),
-                                    status: "offline".to_string(),
-                                    last_seen: Self::now_millis(),
+                                    p2p_port: 10000,
+                                    online: false,
+                                    last_seen: Self::now_nanos(),
                                 });
                             }
+                        }
+                    }
+                    Some("SET_P2P_PORT") => {
+                        if let (Some(user), Some(port_s)) = (parts.next(), parts.next()) {
+                            let p2p_port: u16 = port_s.parse().unwrap_or(10000);
+                            let mut map = self.registered_users.write().await;
+                            let entry = map.entry(user.to_string()).or_insert(UserEntry {
+                                username: user.to_string(),
+                                ip: String::new(),
+                                p2p_port,
+                                online: false,
+                                last_seen: Self::now_nanos(),
+                            });
+                            entry.p2p_port = p2p_port;
+                            entry.last_seen = Self::now_nanos();
                         }
                     }
                     _ => {}
@@ -899,12 +930,14 @@ impl NetNode {
                     match parts.next() {
                         Some("REGISTER") => {
                             if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
+                                let port: u16 = parts.next().unwrap_or("10000").parse().unwrap_or(10000);
                                 let mut map = self.registered_users.write().await;
                                 map.insert(user.to_string(), UserEntry {
                                     username: user.to_string(),
                                     ip: ip.to_string(),
-                                    status: "online".to_string(),
-                                    last_seen: Self::now_millis(),
+                                    p2p_port: port,
+                                    online: true,
+                                    last_seen: Self::now_nanos(),
                                 });
                                 info!("Node {}: Applied REGISTER {} {}", self.id, user, ip);
                             } else {
@@ -915,15 +948,16 @@ impl NetNode {
                             if let Some(user) = parts.next() {
                                 let mut map = self.registered_users.write().await;
                                 if let Some(entry) = map.get_mut(user) {
-                                    entry.status = "offline".to_string();
+                                    entry.online = false;
                                     entry.ip.clear();
-                                    entry.last_seen = Self::now_millis();
+                                    entry.last_seen = Self::now_nanos();
                                 } else {
                                     map.insert(user.to_string(), UserEntry {
                                         username: user.to_string(),
                                         ip: String::new(),
-                                        status: "offline".to_string(),
-                                        last_seen: Self::now_millis(),
+                                        p2p_port: 10000,
+                                        online: false,
+                                        last_seen: Self::now_nanos(),
                                     });
                                 }
                                 info!("Node {}: Applied UNREGISTER {}", self.id, user);
@@ -1005,6 +1039,24 @@ impl NetNode {
                         }
                         Some(other) => {
                             info!("Node {}: Unknown command '{}'", self.id, other);
+                        }
+                        Some("SET_P2P_PORT") => {
+                            if let (Some(user), Some(port_s)) = (parts.next(), parts.next()) {
+                                let p2p_port: u16 = port_s.parse().unwrap_or(10000);
+                                let mut map = self.registered_users.write().await;
+                                let entry = map.entry(user.to_string()).or_insert(UserEntry {
+                                    username: user.to_string(),
+                                    ip: String::new(),
+                                    p2p_port,
+                                    online: false,
+                                    last_seen: Self::now_nanos(),
+                                });
+                                entry.p2p_port = p2p_port;
+                                entry.last_seen = Self::now_nanos();
+                                info!("Node {}: Applied SET_P2P_PORT {} {}", self.id, user, p2p_port);
+                            } else {
+                                info!("Node {}: Malformed SET_P2P_PORT command '{}'", self.id, entry.command);
+                            }
                         }
                         None => {}
                     }
@@ -1188,7 +1240,7 @@ impl NetNode {
         let mut line = String::new();
 
         w.write_all(b"Welcome to Cloud P2P Node API!\n").await?;
-        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> | UNREGISTER <user> | LIST | SHOW_USERS | LIST_PEERS | SUBMIT <op_id> <command...> | ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
+        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> [p2p_port] | UNREGISTER <user> | SET_P2P_PORT <user> <port> | LIST | SHOW_USERS | LIST_PEERS | SUBMIT <op_id> <command...> | ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
 
         loop {
             line.clear();
@@ -1246,6 +1298,42 @@ impl NetNode {
                     };
 
                     let command = format!("REGISTER {} {}", user, ip);
+                    self.append_and_replicate(command).await;
+                    w.write_all(b"OK\n").await?;
+                }
+
+                Some("SET_P2P_PORT") => {
+                    if !is_leader {
+                        match self.forward_to_leader(cmd).await {
+                            Ok(reply) => {
+                                w.write_all(reply.as_bytes()).await?;
+                            }
+                            Err(_) => {
+                                if let Some(lid) = *self.leader_hint.read().await {
+                                    let addr = self.client_addr_for(lid);
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                } else {
+                                    w.write_all(b"NOT_LEADER\n").await?;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    let user = match parts.next() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            w.write_all(b"Usage: SET_P2P_PORT <user> <port>\n").await?;
+                            continue;
+                        }
+                    };
+                    let port_s = match parts.next() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            w.write_all(b"Usage: SET_P2P_PORT <user> <port>\n").await?;
+                            continue;
+                        }
+                    };
+                    let command = format!("SET_P2P_PORT {} {}", user, port_s);
                     self.append_and_replicate(command).await;
                     w.write_all(b"OK\n").await?;
                 }
@@ -1317,7 +1405,16 @@ impl NetNode {
                         w.write_all(b"(empty)\n").await?;
                     } else {
                         for (_, entry) in users.iter() {
-                            w.write_all(format!("{} {} {}\n", entry.username, entry.ip, entry.status).as_bytes()).await?;
+                            w.write_all(
+                                format!(
+                                    "{} {} {} {} {}\n",
+                                    entry.username,
+                                    entry.ip,
+                                    entry.p2p_port,
+                                    entry.online,
+                                    entry.last_seen
+                                ).as_bytes()
+                            ).await?;
                         }
                     }
                 }
@@ -1342,8 +1439,8 @@ impl NetNode {
                     let users = self.registered_users.read().await;
                     let mut out = String::new();
                     for (_, entry) in users.iter() {
-                        if entry.status == "online" && !entry.ip.is_empty() {
-                            out.push_str(&format!("{} {}\n", entry.username, entry.ip));
+                        if entry.online && !entry.ip.is_empty() {
+                            out.push_str(&format!("{} {} {}\n", entry.username, entry.ip, entry.p2p_port));
                         }
                     }
                     if out.is_empty() {

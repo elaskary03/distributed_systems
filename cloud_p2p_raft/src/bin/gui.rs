@@ -332,6 +332,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     const $ = sel => document.querySelector(sel);
     const text = (id, s) => ($(id).textContent = s);
     const WS_URL = "{{WS_URL}}";
+    const DEFAULT_P2P_PORT = 10000;
     let presenceWs = null;
     let currentUser = "";
     let currentIp = "";
@@ -346,7 +347,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
       presenceWs = new WebSocket(WS_URL);
       presenceWs.onopen = () => {
-        try { presenceWs.send(`REGISTER ${currentUser} ${currentIp}`); } catch (e) { console.error(e); }
+        try { presenceWs.send(`REGISTER ${currentUser} ${currentIp} ${DEFAULT_P2P_PORT}`); } catch (e) { console.error(e); }
       };
       presenceWs.onclose = () => {
         // No auto-reconnect; only reconnect when user explicitly connects again
@@ -403,6 +404,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       document.getElementById('loginOut').style.display = 'none';
       clearOutputs();
       connectPresence();
+      // Pull initial user list
+      try { text('#usersOut', await (await fetch('/api/users')).text()); } catch (_) {}
     });
 
     /* Upload & ENCRYPT_ON_CLOUD */

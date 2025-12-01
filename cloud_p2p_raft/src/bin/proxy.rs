@@ -126,9 +126,10 @@ async fn handle_ws(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg) -> 
                     let mut parts = text.split_whitespace();
                     match (parts.next(), parts.next(), parts.next()) {
                         (Some("REGISTER"), Some(user), Some(ip)) => {
+                            let port = parts.next().unwrap_or("10000");
                             current_user = Some(user.to_string());
                             let op_id = next_op_id();
-                            let payload = format!("SUBMIT {} REGISTER {} {}", op_id, user, ip);
+                            let payload = format!("SUBMIT {} REGISTER {} {} {}", op_id, user, ip, port);
                             let resp = submit_idempotent(&seeds, &cfg, &payload).await;
                             if let Ok(s) = resp {
                                 let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(s)).await;
@@ -181,9 +182,10 @@ async fn handle_client(stream: TcpStream, seeds: Vec<SocketAddr>, cfg: ProxyCfg)
                     Some(x) => x,
                     None => { w.write_all(b"Usage: REGISTER <user> <ip>\n").await?; continue; }
                 };
+                let port = parts.next().unwrap_or("10000");
 
                 let op_id = next_op_id();
-                let payload = format!("SUBMIT {} REGISTER {} {}", op_id, user, ip);
+                let payload = format!("SUBMIT {} REGISTER {} {} {}", op_id, user, ip, port);
                 let resp = submit_idempotent(&seeds, &cfg, &payload).await;
                 write_line(&mut w, resp).await?;
             }
