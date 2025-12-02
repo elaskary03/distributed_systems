@@ -652,7 +652,22 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const res = await fetch('/api/images');
         if (!res.ok) return [];
         const data = await res.json();
-        return Array.isArray(data.users) ? data.users : [];
+        let users = Array.isArray(data.users) ? data.users : [];
+        if (!users.length) {
+          // Fallback: build minimal entries from SHOW_USERS so offline users still render
+          try {
+            const raw = await (await fetch('/api/users')).text();
+            users = parseUsers(raw).map(u => ({
+              user: u.user,
+              username: u.user,
+              online: u.online,
+              ip: u.ip,
+              p2p_port: u.port,
+              images: [],
+            }));
+          } catch (_) {}
+        }
+        return users;
       } catch (_) { return []; }
     }
 

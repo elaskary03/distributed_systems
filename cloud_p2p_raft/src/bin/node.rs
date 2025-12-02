@@ -850,6 +850,8 @@ impl NetNode {
 
     // 🔁 Rebuilds the in-memory state machine (e.g., registered_users) from the committed log
     async fn rebuild_state_from_log(&self) {
+        // Keep a snapshot of cached image metadata so offline users retain their last-known images
+        let cached_meta = self.image_metadata.read().await.clone();
         let log = self.log.read().await;
         let commit_index = *self.commit_index.read().await;
 
@@ -881,19 +883,16 @@ impl NetNode {
                     Some("UNREGISTER") => {
                         if let Some(user) = parts.next() {
                             let mut map = self.registered_users.write().await;
-                            if let Some(entry) = map.get_mut(user) {
-                                entry.online = false;
-                                entry.ip.clear();
-                                entry.last_seen = Self::now_nanos();
-                            } else {
-                                map.insert(user.to_string(), UserEntry {
-                                    username: user.to_string(),
-                                    ip: String::new(),
-                                    p2p_port: 10000,
-                                    online: false,
-                                    last_seen: Self::now_nanos(),
-                                });
-                            }
+                            let entry = map.entry(user.to_string()).or_insert(UserEntry {
+                                username: user.to_string(),
+                                ip: String::new(),
+                                p2p_port: 10000,
+                                online: false,
+                                last_seen: Self::now_nanos(),
+                            });
+                            entry.online = false;
+                            // Preserve last known IP/port so offline users stay visible
+                            entry.last_seen = Self::now_nanos();
                         }
                     }
                     Some("SET_P2P_PORT") => {
@@ -918,6 +917,17 @@ impl NetNode {
 
         info!("Node {} rebuild complete: {} users restored",
             self.id, self.registered_users.read().await.len());
+
+        // Reattach cached metadata for users that still exist so offline owners keep their images visible
+        {
+            let users = self.registered_users.read().await;
+            let mut meta = self.image_metadata.write().await;
+            for (user, data) in cached_meta.into_iter() {
+                if users.contains_key(&user) {
+                    meta.insert(user, data);
+                }
+            }
+        }
     }
 
         // Apply committed log entries to state machine
@@ -959,18 +969,26 @@ impl NetNode {
                         }
                         Some("UNREGISTER") => {
                             if let Some(user) = parts.next() {
-                                let mut map = self.registered_users.write().await;
-                                if let Some(entry) = map.get_mut(user) {
-                                    entry.online = false;
-                                    entry.ip.clear();
-                                    entry.last_seen = Self::now_nanos();
-                                } else {
-                                    map.insert(user.to_string(), UserEntry {
-                                        username: user.to_string(),
+                                let user_s = user.to_string();
+                                let (ip, p2p_port) = {
+                                    let mut map = self.registered_users.write().await;
+                                    let entry = map.entry(user_s.clone()).or_insert(UserEntry {
+                                        username: user_s.clone(),
                                         ip: String::new(),
                                         p2p_port: 10000,
                                         online: false,
                                         last_seen: Self::now_nanos(),
+                                    });
+                                    entry.online = false;
+                                    // Keep prior IP/port so offline users still show up with context
+                                    entry.last_seen = Self::now_nanos();
+                                    (entry.ip.clone(), entry.p2p_port)
+                                };
+                                // Try to capture a final metadata snapshot before the owner goes offline.
+                                if !ip.is_empty() {
+                                    let node = self.clone();
+                                    tokio::spawn(async move {
+                                        node.sync_user_metadata(&user_s, &ip, p2p_port).await;
                                     });
                                 }
                                 info!("Node {}: Applied UNREGISTER {}", self.id, user);
@@ -1629,6 +1647,7 @@ impl NetNode {
         if ip.is_empty() {
             return;
         }
+        let cached = self.image_metadata.read().await.get(user).cloned();
         let url = format!(
             "http://{}:{}/list-images?requester={}",
             ip, p2p_port, user
@@ -1640,9 +1659,23 @@ impl NetNode {
             .send()
             .await;
 
+        // Helper to keep the last-known images even if the node is offline
+        let offline_with_cache = |prev: Option<&Value>| {
+            let mut offline = json!({"status": "offline"});
+            if let Some(p) = prev {
+                if let Some(imgs) = p.get("images") {
+                    offline["images"] = imgs.clone();
+                }
+            }
+            offline
+        };
+
         match resp {
             Ok(r) => match r.json::<Value>().await {
-                Ok(json) => {
+                Ok(mut json) => {
+                    if json.get("status").is_none() {
+                        json["status"] = json!("ok");
+                    }
                     self.image_metadata
                         .write()
                         .await
@@ -1654,10 +1687,20 @@ impl NetNode {
                         "Node {} failed to parse metadata for {}: {}",
                         self.id, user, e
                     );
+                    let cached_obj = offline_with_cache(cached.as_ref());
+                    self.image_metadata
+                        .write()
+                        .await
+                        .insert(user.to_string(), cached_obj);
                 }
             },
             Err(e) => {
                 error!("Node {} failed to sync metadata for {}: {}", self.id, user, e);
+                let cached_obj = offline_with_cache(cached.as_ref());
+                self.image_metadata
+                    .write()
+                    .await
+                    .insert(user.to_string(), cached_obj);
             }
         }
     }
