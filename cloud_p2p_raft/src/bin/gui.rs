@@ -642,9 +642,15 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       return parseUsers(body).filter(u => u.online && !!u.ip);
     }
 
-    async function resolvePeer(name) {
+    async function resolvePeer(name, opts = {}) {
       const peers = await getOnlinePeers();
-      return peers.find(p => p.user === name) || null;
+      const found = peers.find(p => p.user === name);
+      if (found) return found;
+      if (opts.allowOffline) {
+        const all = parseUsers(await ensureUsersList());
+        return all.find(p => p.user === name && !!p.ip) || null;
+      }
+      return null;
     }
 
     async function fetchCachedImages() {
@@ -877,7 +883,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       if (!peer || !imgId || !currentUser) { text('#peerOut', 'peer, image_id, and login required'); return; }
       if (views <= 0) { text('#peerOut', 'views must be positive'); return; }
       try {
-        const info = await resolvePeer(peer);
+        // For requests we allow targeting offline peers using last-known IP/port
+        const info = await resolvePeer(peer, { allowOffline: true });
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
         const url = `http://${info.ip}:${info.port}/request-image/${encodeURIComponent(imgId)}`;
         const res = await fetch(url, {
