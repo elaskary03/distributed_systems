@@ -7,6 +7,7 @@ use axum::{
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     fs as tokio_fs,
@@ -105,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/users", get(api_users))
         .route("/api/peers", get(api_peers))
         .route("/api/list", get(api_list))
+        .route("/api/images", get(api_images))
         .route("/api/upload", post(api_upload))
         .route("/api/decrypt", post(api_decrypt))         // client-side decrypt
         .route("/api/find-stego", get(api_find_stego))    // stego discovery for auto-download
@@ -215,6 +217,12 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
       font-size: 13px; white-space: pre-wrap; overflow:auto; max-height: 220px;
     }
+    .user-row{ border:1px solid var(--border); border-radius:10px; padding:10px; margin-bottom:10px; background:#fff; }
+    .user-header{ display:flex; align-items:center; gap:8px; font-weight:700; }
+    .status-dot{ width:10px; height:10px; border-radius:50%; display:inline-block; }
+    .image-list{ margin-top:8px; display:grid; gap:6px; grid-template-columns:1fr; }
+    .image-chip{ padding:6px 8px; border:1px dashed var(--border); border-radius:8px; background:#f9fafb; }
+    .image-chip code{ background:none; padding:0; }
 
     .hint{ color: var(--muted); font-size: 12px; margin-top: 8px; }
     .pill{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border); background:#fff; }
@@ -375,6 +383,13 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
   <script>
     const $ = sel => document.querySelector(sel);
     const text = (id, s) => ($(id).textContent = s);
+    const escapeHtml = (s = '') => s
+      .toString()
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
     const WS_URL = "{{WS_URL}}";
     const DEFAULT_P2P_PORT = 10000;
     let presenceWs = null;
@@ -436,6 +451,40 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         login.style.display = 'block';
         main.style.display = 'none';
       }
+    }
+
+    function renderUserImages(users = []) {
+      if (!users.length) return 'No users found';
+      return users.map(u => {
+        const name = escapeHtml(u.user || u.username || 'unknown');
+        const imgs = Array.isArray(u.images) ? u.images : [];
+        const color = u.online ? '#16a34a' : '#dc2626';
+        const status = u.online ? 'online' : 'offline';
+        const imagesHtml = imgs.length
+          ? imgs.map(img => {
+              const id = escapeHtml(img.id || 'unknown');
+              const owner = escapeHtml(img.owner || '');
+              const remaining = img.remaining_views_for_requester !== undefined
+                ? ` • remaining: ${img.remaining_views_for_requester}`
+                : '';
+              const perms = img.permissions && typeof img.permissions === 'object'
+                ? ` • perms: ${Object.entries(img.permissions).map(([k,v]) => `${escapeHtml(k)}=${v}`).join(', ')}`
+                : '';
+              return `<div class="image-chip"><code>${id}</code>${owner ? ` • owner: ${owner}` : ''}${remaining}${perms}</div>`;
+            }).join('')
+          : '<div class="image-chip">No images</div>';
+        return `
+<div class="user-row">
+  <div class="user-header">
+    <span class="status-dot" style="background:${color}"></span>
+    ${name} (${status})
+  </div>
+  <div class="image-list">
+    ${imagesHtml}
+  </div>
+</div>
+        `.trim();
+      }).join('\n');
     }
 
     // Ask the server to locate the stego file path for this image_id
@@ -598,6 +647,65 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       return peers.find(p => p.user === name) || null;
     }
 
+    async function fetchCachedImages() {
+      try {
+        const res = await fetch('/api/images');
+        if (!res.ok) return [];
+        const data = await res.json();
+        return Array.isArray(data.users) ? data.users : [];
+      } catch (_) { return []; }
+    }
+
+    async function fetchLiveImages() {
+      const peers = await getOnlinePeers();
+      const results = [];
+      for (const peer of peers) {
+        const url = `http://${peer.ip}:${peer.port}/list-images?requester=${encodeURIComponent(currentUser || '')}`;
+        try {
+          const res = await fetch(url);
+          const json = await res.json();
+          const images = (json.images || []).filter(img => !img.owner || img.owner === peer.user);
+          results.push({
+            user: peer.user,
+            username: peer.user,
+            online: true,
+            ip: peer.ip,
+            p2p_port: peer.port,
+            status: json.status || 'ok',
+            images,
+          });
+        } catch (err) {
+          results.push({ user: peer.user, username: peer.user, online: true, error: String(err), images: [] });
+        }
+      }
+      return results;
+    }
+
+    function mergeUsers(cached, live) {
+      const map = new Map();
+      for (const u of cached || []) {
+        const key = u.user || u.username || '';
+        if (!key) continue;
+        map.set(key, { ...u, user: key, username: key });
+      }
+      for (const u of live || []) {
+        const key = u.user || u.username || '';
+        if (!key) continue;
+        const existing = map.get(key) || {};
+        map.set(key, {
+          ...existing,
+          ...u,
+          user: key,
+          username: key,
+          images: u.images || existing.images || [],
+          online: u.online !== undefined ? u.online : existing.online,
+          ip: u.ip || existing.ip || '',
+          p2p_port: u.p2p_port || existing.p2p_port || DEFAULT_P2P_PORT,
+        });
+      }
+      return Array.from(map.values());
+    }
+
     async function fetchBinary(url) {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`status ${res.status}`);
@@ -652,26 +760,15 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     /* P2P actions */
     $('#peerListBtn').addEventListener('click', async () => {
       try {
-        const peers = await getOnlinePeers();
-        if (!peers.length) { text('#peerOut', 'no online peers found'); return; }
-        const results = [];
-        for (const peer of peers) {
-          const url = `http://${peer.ip}:${peer.port}/list-images?requester=${encodeURIComponent(currentUser || '')}`;
-          try {
-            const res = await fetch(url);
-            const json = await res.json();
-            // Only surface images actually owned by the peer; otherwise the list becomes confusing
-            const images = (json.images || []).filter(img => img.owner === peer.user);
-            results.push({
-              user: peer.user,
-              images,
-              status: images.length ? (json.status || 'ok') : 'no images for this user',
-            });
-          } catch (err) {
-            results.push({ user: peer.user, error: String(err) });
-          }
-        }
-        text('#peerOut', JSON.stringify(results, null, 2));
+        text('#peerOut', 'Loading image metadata...');
+        const [cached, live] = await Promise.all([
+          fetchCachedImages(),
+          fetchLiveImages().catch(() => []),
+        ]);
+        const merged = mergeUsers(cached, live);
+        if (!merged.length) { text('#peerOut', 'no users found'); return; }
+        const out = document.getElementById('peerOut');
+        out.innerHTML = renderUserImages(merged);
       } catch (err) { text('#peerOut', String(err)); }
     });
 
@@ -880,6 +977,16 @@ async fn api_peers(State(st): State<AppState>) -> impl IntoResponse {
 }
 async fn api_list(State(st): State<AppState>) -> impl IntoResponse {
     proxy_send_multiline(&st.proxy_addr, "LIST").await.into_response()
+}
+async fn api_images(State(st): State<AppState>) -> impl IntoResponse {
+    let (status, body) = proxy_send_multiline(&st.proxy_addr, "IMAGE_METADATA").await;
+    if status != StatusCode::OK {
+        return (status, body).into_response();
+    }
+    match serde_json::from_str::<Value>(&body) {
+        Ok(json) => (StatusCode::OK, Json(json)).into_response(),
+        Err(_) => (StatusCode::BAD_GATEWAY, body).into_response(),
+    }
 }
 
 /* =========================

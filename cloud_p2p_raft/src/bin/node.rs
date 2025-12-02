@@ -1,6 +1,6 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1250,7 +1250,7 @@ impl NetNode {
         let mut line = String::new();
 
         w.write_all(b"Welcome to Cloud P2P Node API!\n").await?;
-        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> [p2p_port] | UNREGISTER <user> | SET_P2P_PORT <user> <port> | LIST | SHOW_USERS | LIST_USERS | LIST_PEERS | SUBMIT <op_id> <command...> | ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
+        w.write_all(b"Commands: LEADER | REGISTER <user> <ip> [p2p_port] | UNREGISTER <user> | SET_P2P_PORT <user> <port> | LIST | SHOW_USERS | LIST_USERS | IMAGE_METADATA | LIST_PEERS | SUBMIT <op_id> <command...> | ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
 
         loop {
             line.clear();
@@ -1427,6 +1427,49 @@ impl NetNode {
                             ).await?;
                         }
                     }
+                }
+                Some("IMAGE_METADATA") => {
+                    if !is_leader {
+                        match self.forward_to_leader("IMAGE_METADATA").await {
+                            Ok(reply) => {
+                                w.write_all(reply.as_bytes()).await?;
+                            }
+                            Err(_) => {
+                                if let Some(lid) = *self.leader_hint.read().await {
+                                    let addr = self.client_addr_for(lid);
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                } else {
+                                    w.write_all(b"NOT_LEADER\n").await?;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    let users = self.registered_users.read().await;
+                    let metadata = self.image_metadata.read().await;
+                    let mut list = Vec::new();
+                    for (_, entry) in users.iter() {
+                        let meta = metadata.get(&entry.username);
+                        let images = meta
+                            .and_then(|m| m.get("images"))
+                            .cloned()
+                            .unwrap_or_else(|| json!([]));
+                        let status = meta
+                            .and_then(|m| m.get("status"))
+                            .cloned()
+                            .unwrap_or_else(|| json!("unknown"));
+                        list.push(json!({
+                            "user": entry.username,
+                            "online": entry.online,
+                            "ip": entry.ip,
+                            "p2p_port": entry.p2p_port,
+                            "status": status,
+                            "images": images
+                        }));
+                    }
+                    let body = json!({ "users": list }).to_string() + "\n";
+                    w.write_all(body.as_bytes()).await?;
                 }
                 Some("LIST_PEERS") => {
                     if !is_leader {

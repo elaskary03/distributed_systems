@@ -197,7 +197,7 @@ async fn handle_client(
 
     // Present a simple banner (your proxy protocol)
     w.write_all(b"Welcome to Cloud P2P Proxy!\n").await?;
-    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | LIST_PEERS | SHOW_USERS | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
+    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | LIST_PEERS | SHOW_USERS | IMAGE_METADATA | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
 
     loop {
         line.clear();
@@ -262,6 +262,13 @@ async fn handle_client(
 
             "LIST_PEERS" => {
                 match query_any(&seeds, "LIST_PEERS").await {
+                    Ok(s) => w.write_all(s.as_bytes()).await?,
+                    Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
+                }
+            }
+
+            "IMAGE_METADATA" => {
+                match query_any(&seeds, "IMAGE_METADATA").await {
                     Ok(s) => w.write_all(s.as_bytes()).await?,
                     Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
                 }
