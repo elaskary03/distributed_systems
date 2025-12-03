@@ -43,6 +43,8 @@ struct OwnerPaths {
 struct Metadata {
     owner: String,
     permissions: HashMap<String, i64>,
+    #[serde(default)]
+    shared_passphrases: HashMap<String, String>,
     last_update_ns: u128,
 }
 
@@ -63,6 +65,8 @@ struct PendingRequest {
 struct RequestImage {
     requester: String,
     views: i64,
+    #[serde(default)]
+    passphrase: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +252,11 @@ async fn list_images(
                     "remaining_views_for_requester": remaining,
                     "last_update_ns": meta.last_update_ns
                 });
+                if let Some(req) = requester.as_ref() {
+                    if let Some(pw) = meta.shared_passphrases.get(req) {
+                        obj["shared_passphrase"] = serde_json::Value::String(pw.clone());
+                    }
+                }
                 if is_owner && meta.owner == st.owner {
                     if let Ok(reqs) = load_pending_requests(&meta_dir, &id).await {
                         obj["pending_requests"] = serde_json::to_value(reqs).unwrap_or(json!([]));
@@ -446,6 +455,11 @@ async fn approve_request(
     *entry += body.views;
     meta.last_update_ns = now_nanos();
     ensure_owner_default_perm(&mut meta);
+    if let Some(pw) = body.passphrase.as_ref() {
+        if !pw.trim().is_empty() {
+            meta.shared_passphrases.insert(body.requester.clone(), pw.trim().to_string());
+        }
+    }
 
     let _ = save_metadata(&paths.meta, &image_id, &meta).await;
 
@@ -690,20 +704,17 @@ fn now_nanos() -> u128 {
 
 fn default_metadata(owner: &str, base: Option<HashMap<String, i64>>) -> Metadata {
     let mut permissions = base.unwrap_or_default();
-    if !permissions.contains_key(owner) {
-        permissions.insert(owner.to_string(), i64::MAX / 4);
-    }
     Metadata {
         owner: owner.to_string(),
         permissions,
+        shared_passphrases: HashMap::new(),
         last_update_ns: now_nanos(),
     }
 }
 
 fn ensure_owner_default_perm(meta: &mut Metadata) {
-    if !meta.permissions.contains_key(&meta.owner) {
-        meta.permissions.insert(meta.owner.clone(), i64::MAX / 4);
-    }
+    // Owners do not need stored infinite quota; keep map clean.
+    meta.permissions.remove(&meta.owner);
 }
 
 fn embed_metadata_into_png(img_bytes: &[u8], meta: &Metadata) -> anyhow::Result<Vec<u8>> {

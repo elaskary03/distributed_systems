@@ -8,11 +8,20 @@ use axum::{
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    env, fs,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+    process::Stdio,
+};
 use tokio::{
     fs as tokio_fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    process::Command,
+    sync::Mutex,
     time::{sleep, timeout},
 };
 use tower_http::services::ServeDir;
@@ -38,6 +47,16 @@ struct AppState {
     proxy_addr: Arc<String>,
     uploads_dir: Arc<PathBuf>,
     stego_dir: Arc<PathBuf>,   // NEW: serve and scan the stego/ folder
+    launcher_dir: Arc<PathBuf>,
+    launcher: Arc<Mutex<std::collections::HashMap<String, ManagedChild>>>,
+}
+
+struct ManagedChild {
+    pid: u32,
+    port: u16,
+    log_path: PathBuf,
+    #[allow(dead_code)]
+    child: tokio::process::Child,
 }
 
 /* =========================
@@ -74,13 +93,17 @@ async fn main() -> anyhow::Result<()> {
     let base_dir = get_data_dir();
     let uploads_dir = base_dir.join("uploads");
     let stego_dir = base_dir.join("stego"); // NEW
+    let launcher_dir = base_dir.join("launcher");
     fs::create_dir_all(&uploads_dir).ok();
     fs::create_dir_all(&stego_dir).ok();   // NEW
+    fs::create_dir_all(&launcher_dir).ok();
 
     let state = AppState {
         proxy_addr: Arc::new(args.proxy_addr),
         uploads_dir: Arc::new(uploads_dir.clone()),
         stego_dir: Arc::new(stego_dir.clone()),    // NEW
+        launcher_dir: Arc::new(launcher_dir.clone()),
+        launcher: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     // Serve both /files/uploads/* and /files/stego/* (so the browser can download them)
@@ -110,6 +133,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/upload", post(api_upload))
         .route("/api/decrypt", post(api_decrypt))         // client-side decrypt
         .route("/api/find-stego", get(api_find_stego))    // stego discovery for auto-download
+        .route("/api/launcher/list", get(api_launcher_list))
+        .route("/api/launcher/launch", post(api_launcher_launch))
+        .route("/api/launcher/stop", post(api_launcher_stop))
         .nest("/files", files_router)
         .with_state(state);
 
@@ -358,6 +384,30 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           <div id="requestsList" class="out"></div>
         </section>
       </div>
+
+      <!-- Fourth row: Local client launcher -->
+      <div class="grid">
+        <section>
+          <h2>🧭 Local Clients (launcher)</h2>
+          <div class="row">
+            <div>
+              <label>Username</label>
+              <input id="launchUser" type="text" placeholder="alice">
+            </div>
+            <div>
+              <label>Port</label>
+              <input id="launchPort" type="number" value="10002" min="1">
+            </div>
+          </div>
+          <div class="btns" style="margin-top:8px">
+            <button id="launchBtn" class="btn-accent">LAUNCH</button>
+            <button id="stopBtn" class="btn-warn">STOP</button>
+            <button id="listLaunchBtn">LIST</button>
+          </div>
+          <div id="launchOut" class="out"></div>
+          <div class="hint">Starts/stops local <span class="pill">client_p2p</span> processes from this GUI host. Logs under <span class="pill">~/.cloudp2p/launcher/</span>.</div>
+        </section>
+      </div>
     </div>
   </div>
 
@@ -388,6 +438,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       .replace(/'/g, '&#39;');
     const WS_URL = "{{WS_URL}}";
     const DEFAULT_P2P_PORT = 10000;
+    const LAUNCH_PORT_DEFAULT = 10002;
     let presenceWs = null;
     let currentUser = "";
     let currentIp = "";
@@ -396,6 +447,21 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let pendingCache = [];
     let activeViewer = null;
     let lastViewedContext = null;
+    const launchStatus = (msg) => { text('#loginOut', msg); document.getElementById('loginOut').style.display = 'block'; };
+
+    async function startLocalClient(user, port = DEFAULT_P2P_PORT) {
+      try {
+        const res = await fetch('/api/launcher/launch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user, port })
+        });
+        const body = await res.text();
+        launchStatus(body);
+      } catch (err) {
+        launchStatus('launcher error: ' + err);
+      }
+    }
 
     // Maintain a websocket presence session. Server auto-unregisters on disconnect.
     function connectPresence() {
@@ -514,10 +580,13 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
               const remaining = img.remaining_views_for_requester !== undefined
                 ? ` • remaining: ${img.remaining_views_for_requester}`
                 : '';
+              const sharedPw = img.shared_passphrase
+                ? ` • passphrase: ${escapeHtml(img.shared_passphrase)}`
+                : '';
               const perms = img.permissions && typeof img.permissions === 'object'
                 ? ` • perms: ${Object.entries(img.permissions).map(([k,v]) => `${escapeHtml(k)}=${v}`).join(', ')}`
                 : '';
-              return `<div class="image-chip"><code>${id}</code>${owner ? ` • owner: ${owner}` : ''}${remaining}${perms}</div>`;
+              return `<div class="image-chip"><code>${id}</code>${owner ? ` • owner: ${owner}` : ''}${remaining}${sharedPw}${perms}</div>`;
             }).join('')
           : '<div class="image-chip">No images</div>';
         return `
@@ -564,6 +633,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       document.getElementById('loginOut').style.display = 'none';
       clearOutputs();
       connectPresence();
+      startLocalClient(user).catch(() => {});
       // Pull initial user list
       try {
         const list = await (await fetch('/api/users')).text();
@@ -818,6 +888,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           <div><strong>Requested:</strong> ${req.requested}</div>
           <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
             <input type="number" id="approve-${idx}" value="${req.requested}" min="1" style="width:90px;">
+            <input type="text" id="pass-${idx}" placeholder="passphrase (optional)" style="width:180px;">
             <button class="approve-btn" data-idx="${idx}">Approve</button>
             <button class="reject-btn" data-idx="${idx}">Reject</button>
           </div>
@@ -928,11 +999,13 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const input = document.getElementById(`approve-${idx}`);
         const approved = parseInt((input?.value || '0'), 10);
         if (!approved || approved <= 0) { text('#requestsList', 'Approved views must be positive'); return; }
+        const passInput = document.getElementById(`pass-${idx}`);
+        const passphrase = (passInput?.value || '').trim();
         const url = `http://${currentIp}:${DEFAULT_P2P_PORT}/approve-request/${encodeURIComponent(req.image)}`;
         await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requester: req.viewer, views: approved }),
+          body: JSON.stringify({ requester: req.viewer, views: approved, passphrase }),
         });
         await refreshOwnerRequests();
       } else if (btn.classList.contains('reject-btn')) {
@@ -968,6 +1041,44 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         text('#peerOut', await res.text());
         await refreshOwnerRequests();
       } catch (err) { text('#peerOut', String(err)); }
+    });
+
+    /* Local launcher */
+    $('#launchBtn').addEventListener('click', async () => {
+      const user = ($('#launchUser').value || '').trim();
+      const port = parseInt($('#launchPort').value || `${LAUNCH_PORT_DEFAULT}`, 10);
+      if (!user || port <= 0) { text('#launchOut', 'username and valid port required'); return; }
+      try {
+        const res = await fetch('/api/launcher/launch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user, port })
+        });
+        const body = await res.text();
+        text('#launchOut', body);
+      } catch (err) { text('#launchOut', String(err)); }
+    });
+
+    $('#stopBtn').addEventListener('click', async () => {
+      const user = ($('#launchUser').value || '').trim();
+      if (!user) { text('#launchOut', 'username required to stop'); return; }
+      try {
+        const res = await fetch('/api/launcher/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user })
+        });
+        const body = await res.text();
+        text('#launchOut', body);
+      } catch (err) { text('#launchOut', String(err)); }
+    });
+
+    $('#listLaunchBtn').addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/launcher/list');
+        const body = await res.text();
+        text('#launchOut', body);
+      } catch (err) { text('#launchOut', String(err)); }
     });
 
     /* Go Offline */
@@ -1224,6 +1335,93 @@ async fn api_decrypt(
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     (StatusCode::OK, headers, plaintext).into_response()
+}
+
+/* =========================
+   Local client launcher
+   ========================= */
+#[derive(Deserialize)]
+struct LaunchReq {
+    user: String,
+    port: u16,
+}
+
+#[derive(Deserialize)]
+struct StopReq {
+    user: String,
+}
+
+async fn api_launcher_list(State(st): State<AppState>) -> impl IntoResponse {
+    let map = st.launcher.lock().await;
+    let mut entries: Vec<String> = map
+        .iter()
+        .map(|(u, child)| format!("{}: pid={} port={} log={}", u, child.pid, child.port, child.log_path.display()))
+        .collect();
+    entries.sort();
+    let body = if entries.is_empty() { "no local clients".to_string() } else { entries.join("\n") };
+    (StatusCode::OK, body).into_response()
+}
+
+async fn api_launcher_launch(
+    State(st): State<AppState>,
+    Json(payload): Json<LaunchReq>,
+) -> impl IntoResponse {
+    let user = payload.user.trim();
+    if user.is_empty() || payload.port == 0 {
+        return (StatusCode::BAD_REQUEST, "user and valid port required").into_response();
+    }
+    {
+        let map = st.launcher.lock().await;
+        if map.contains_key(user) {
+            return (StatusCode::BAD_REQUEST, "already running").into_response();
+        }
+    }
+
+    let log_path = st.launcher_dir.join(format!("{}.log", user));
+    let log_file = match std::fs::File::create(&log_path) {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("log create: {e}")).into_response(),
+    };
+    let mut cmd = Command::new("cargo");
+    cmd.arg("run")
+        .arg("--bin").arg("client_p2p")
+        .arg("--")
+        .arg("--user").arg(user)
+        .arg("--port").arg(payload.port.to_string())
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file));
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("spawn: {e}")).into_response(),
+    };
+    let pid = child.id().unwrap_or(0);
+
+    st.launcher.lock().await.insert(user.to_string(), ManagedChild {
+        pid,
+        port: payload.port,
+        log_path: log_path.clone(),
+        child,
+    });
+
+    (StatusCode::OK, format!("launched {} on port {} (pid {}) log={}", user, payload.port, pid, log_path.display())).into_response()
+}
+
+async fn api_launcher_stop(
+    State(st): State<AppState>,
+    Json(payload): Json<StopReq>,
+) -> impl IntoResponse {
+    let user = payload.user.trim();
+    if user.is_empty() {
+        return (StatusCode::BAD_REQUEST, "user required").into_response();
+    }
+    let mut guard = st.launcher.lock().await;
+    let Some(mut entry) = guard.remove(user) else {
+        return (StatusCode::NOT_FOUND, "not running").into_response();
+    };
+    let _ = entry.child.start_kill();
+    let _ = entry.child.wait().await;
+    (StatusCode::OK, format!("stopped {}", user)).into_response()
 }
 
 /* =========================
