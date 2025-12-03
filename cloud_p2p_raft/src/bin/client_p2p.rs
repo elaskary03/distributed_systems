@@ -161,14 +161,10 @@ async fn upload_image(
     };
     let base_perms: Option<HashMap<String, i64>> = permissions_raw
         .and_then(|s| serde_json::from_str(&s).ok());
-    let mut meta = extract_metadata_from_png(&stego_bytes, &owner)
-        .unwrap_or_else(|_| default_metadata(&owner, base_perms.clone()));
+    let mut meta = default_metadata(&owner, base_perms.clone());
     if let Some(p) = base_perms {
         meta.permissions = p;
     }
-    meta.owner = owner.clone();
-    ensure_owner_default_perm(&mut meta);
-    meta.last_update_ns = now_nanos();
 
     // Save original (use provided preview/original bytes when available)
     if let Err(e) = save_image(&owner_paths.original, &image_id, &original_bytes).await {
@@ -184,18 +180,12 @@ async fn upload_image(
         eprintln!("preview save failed for {}: {}", image_id, e);
     }
 
-    let stego = match embed_metadata_into_png(&stego_bytes, &meta) {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("embed metadata: {e}"),
-            )
-                .into_response();
-        }
-    };
+    meta.last_update_ns = now_nanos();
+    if let Err(e) = save_metadata(&owner_paths.meta, &image_id, &meta).await {
+        eprintln!("save metadata failed for {}: {}", image_id, e);
+    }
 
-    if let Err(e) = save_image(&owner_paths.encrypted, &image_id, &stego).await {
+    if let Err(e) = save_image(&owner_paths.encrypted, &image_id, &stego_bytes).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("save image: {e}"),
@@ -236,7 +226,7 @@ async fn list_images(
                 Some(v) => v,
                 None => continue,
             };
-            if let Ok(mut meta) = load_metadata(&enc_dir, &id).await {
+            if let Ok(mut meta) = load_metadata(&meta_dir, &id).await {
                 if meta.owner.is_empty() {
                     meta.owner = st.owner.clone();
                 }
@@ -304,7 +294,7 @@ async fn full_image(
         None => return (StatusCode::BAD_REQUEST, "missing requester").into_response(),
     };
 
-    let mut meta = match load_metadata(&paths.encrypted, &image_id).await {
+    let mut meta = match load_metadata(&paths.meta, &image_id).await {
         Ok(m) => m,
         Err(_) => {
             let _ = enqueue_pending(
@@ -327,22 +317,19 @@ async fn full_image(
         }
         meta.permissions.insert(requester.clone(), quota - 1);
         meta.last_update_ns = now_nanos();
-        if let Ok(bytes) = load_image(&paths.encrypted, &image_id).await {
-            if let Ok(updated) = embed_metadata_into_png(&bytes, &meta) {
-                let _ = save_image(&paths.encrypted, &image_id, &updated).await;
-            }
-        }
+        let _ = save_metadata(&paths.meta, &image_id, &meta).await;
         let _ = replay_pending(&paths.meta, &image_id).await;
-    }
+        }
 
     match load_image(&paths.encrypted, &image_id).await {
         Ok(bytes) => {
-            let cd = format!("attachment; filename=\"{}.png\"", image_id);
+            let cd = format!("inline; filename=\"{}.png\"", image_id);
             (
                 StatusCode::OK,
                 [
                     ("content-type", "image/png".to_string()),
                     ("content-disposition", cd),
+                    ("cache-control", "no-store".to_string()),
                 ],
                 bytes,
             )
@@ -365,7 +352,7 @@ async fn request_image(
         return (StatusCode::NOT_FOUND, "image not found").into_response();
     }
 
-    match load_metadata(&paths.encrypted, &image_id).await {
+    match load_metadata(&paths.meta, &image_id).await {
         Ok(meta) => {
             if meta.permissions.get(&body.requester).copied().unwrap_or(0) > 0 {
                 return (StatusCode::BAD_REQUEST, "already has quota").into_response();
@@ -403,11 +390,11 @@ async fn approve_request(
         return (StatusCode::BAD_REQUEST, "viewer and approved_views required").into_response();
     }
     let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
-    let img_bytes = match load_image(&paths.encrypted, &image_id).await {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::NOT_FOUND, "image not found").into_response(),
-    };
-    let mut meta = extract_metadata_from_png(&img_bytes, &st.owner)
+    if load_image(&paths.encrypted, &image_id).await.is_err() {
+        return (StatusCode::NOT_FOUND, "image not found").into_response();
+    }
+    let mut meta = load_metadata(&paths.meta, &image_id)
+        .await
         .unwrap_or_else(|_| default_metadata(&st.owner, None));
     if meta.owner != st.owner {
         return (StatusCode::FORBIDDEN, "not owner").into_response();
@@ -425,11 +412,7 @@ async fn approve_request(
     meta.last_update_ns = now_nanos();
     ensure_owner_default_perm(&mut meta);
 
-    let stego = match embed_metadata_into_png(&img_bytes, &meta) {
-        Ok(b) => b,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("embed: {e}")).into_response(),
-    };
-    let _ = save_image(&paths.encrypted, &image_id, &stego).await;
+    let _ = save_metadata(&paths.meta, &image_id, &meta).await;
 
     pending.retain(|r| r.viewer != body.requester);
     let _ = save_pending_requests(&paths.meta, &image_id, &pending).await;
@@ -447,11 +430,11 @@ async fn reject_request(
         return (StatusCode::BAD_REQUEST, "viewer required").into_response();
     }
     let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
-    let img_bytes = match load_image(&paths.encrypted, &image_id).await {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::NOT_FOUND, "image not found").into_response(),
-    };
-    let meta = extract_metadata_from_png(&img_bytes, &st.owner)
+    if load_image(&paths.encrypted, &image_id).await.is_err() {
+        return (StatusCode::NOT_FOUND, "image not found").into_response();
+    }
+    let meta = load_metadata(&paths.meta, &image_id)
+        .await
         .unwrap_or_else(|_| default_metadata(&st.owner, None));
     if meta.owner != st.owner {
         return (StatusCode::FORBIDDEN, "not owner").into_response();
@@ -504,24 +487,39 @@ async fn resolve_owner_paths(base: &PathBuf, owner: &str, image_id: &str) -> Own
 
 // helpers
 async fn load_metadata(root: &PathBuf, id: &str) -> Result<Metadata, anyhow::Error> {
-    let img = load_image(root, id).await?;
-    let owner_hint = root
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let mut meta = extract_metadata_from_png(&img, &owner_hint)?;
-    if meta.owner.is_empty() && !owner_hint.is_empty() {
-        meta.owner = owner_hint;
+    let path = root.join(format!("{}.json", id));
+    if let Ok(data) = fs::read(&path).await {
+        let mut meta: Metadata = serde_json::from_slice(&data)?;
+        let owner_hint = root
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if meta.owner.is_empty() && !owner_hint.is_empty() {
+            meta.owner = owner_hint;
+        }
+        ensure_owner_default_perm(&mut meta);
+        return Ok(meta);
     }
-    ensure_owner_default_perm(&mut meta);
-    Ok(meta)
+
+    // Backward-compat: try to read embedded metadata from encrypted image if json missing
+    if let Some(enc_dir) = root.parent().map(|p| p.join("encrypted")) {
+        if let Ok(img) = load_image(&enc_dir, id).await {
+            if let Ok(mut meta) = extract_metadata_from_png(&img, "") {
+                ensure_owner_default_perm(&mut meta);
+                return Ok(meta);
+            }
+        }
+    }
+    anyhow::bail!("metadata not found")
 }
 
 async fn save_metadata(root: &PathBuf, id: &str, meta: &Metadata) -> Result<(), anyhow::Error> {
-    let img = load_image(root, id).await?;
-    let stego = embed_metadata_into_png(&img, meta)?;
-    save_image(root, id, &stego).await
+    fs::create_dir_all(root).await.ok();
+    let path = root.join(format!("{}.json", id));
+    let data = serde_json::to_vec_pretty(meta)?;
+    fs::write(path, data).await?;
+    Ok(())
 }
 
 async fn load_image(root: &PathBuf, id: &str) -> Result<Vec<u8>, anyhow::Error> {

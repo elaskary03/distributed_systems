@@ -332,6 +332,10 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
               <label>Requested Views</label>
               <input id="peerViews" type="number" value="1" min="1">
             </div>
+            <div>
+              <label>Passphrase (for FULL decrypt)</label>
+              <input id="peerPassphrase" type="password" placeholder="required to view full image">
+            </div>
           </div>
           <div class="btns" style="margin-top:8px">
             <button id="peerListBtn">LIST_IMAGES</button>
@@ -339,6 +343,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             <button id="peerFullBtn">FULL</button>
             <button id="peerRequestBtn">REQUEST_IMAGE</button>
           </div>
+          <div class="hint">FULL will fetch & decrypt for a single in-browser view. Close the viewer to consume one view and refresh quotas.</div>
           <div id="peerOut" class="out"></div>
           <div style="margin-top:8px">
             <img id="peerImg" style="max-width:100%; display:none; border:1px solid var(--border); border-radius:8px;" />
@@ -353,29 +358,20 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           <div id="requestsList" class="out"></div>
         </section>
       </div>
+    </div>
+  </div>
 
-      <!-- Fourth row: Client-side Decrypt -->
-      <div class="grid">
-        <section>
-          <h2>🗝️ Decrypt Local Image <span class="badge">client-side</span></h2>
-          <form id="decryptForm">
-            <div class="row">
-              <div>
-                <label>Stego image (PNG/JPEG)</label>
-                <input type="file" name="file" accept="image/png,image/jpeg" required>
-              </div>
-              <div>
-                <label>Passphrase</label>
-                <input type="password" name="passphrase" placeholder="the same key you used" required>
-              </div>
-            </div>
-            <div style="margin-top:12px" class="btns">
-              <button type="submit">Decrypt & Download Payload</button>
-            </div>
-          </form>
-          <div id="decryptOut" class="out"></div>
-          <div class="hint">Runs on the GUI server (not the cluster). If the payload is an image, it downloads with the right extension; otherwise falls back to <span class="pill">decrypted.bin</span>.</div>
-        </section>
+  <!-- Inline viewer for FULL (no download) -->
+  <div id="viewerModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); align-items:center; justify-content:center; padding:20px; z-index:1000;">
+    <div id="viewerCard" style="background:#fff; border-radius:12px; max-width:90%; max-height:90%; width:min(960px, 100%); padding:14px; box-shadow:0 20px 60px rgba(0,0,0,.25); display:flex; flex-direction:column; gap:10px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+        <div id="viewerTitle" style="font-weight:700;">Viewing image</div>
+        <button id="viewerClose" class="btn-warn" style="margin:0; padding:6px 10px;">Close</button>
+      </div>
+      <div id="viewerNotice" class="hint">Close to consume this view; data is not saved to disk.</div>
+      <div style="flex:1; overflow:auto; display:flex; justify-content:center; align-items:center; background:#f8fafc; border:1px solid var(--border); border-radius:10px; padding:10px;">
+        <img id="viewerImg" style="max-width:100%; max-height:100%; border-radius:8px; display:none;" />
+        <div id="viewerText" class="out" style="display:none; width:100%; height:100%; margin:0;"></div>
       </div>
     </div>
   </div>
@@ -398,6 +394,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let cachedUsersList = "";
     let manualLogout = false;
     let pendingCache = [];
+    let activeViewer = null;
+    let lastViewedContext = null;
 
     // Maintain a websocket presence session. Server auto-unregisters on disconnect.
     function connectPresence() {
@@ -436,9 +434,58 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       };
     }
 
+    function closeViewer(refresh = true) {
+      const modal = $('#viewerModal');
+      if (!modal) return;
+      const img = $('#viewerImg');
+      const txt = $('#viewerText');
+      if (activeViewer?.url) { URL.revokeObjectURL(activeViewer.url); }
+      if (img) { img.src = ''; img.style.display = 'none'; }
+      if (txt) { txt.textContent = ''; txt.style.display = 'none'; }
+      modal.style.display = 'none';
+      activeViewer = null;
+      if (refresh && lastViewedContext) {
+        refreshPeerList().catch(() => {});
+      }
+      lastViewedContext = null;
+    }
+
+    function openViewer(blob, opts = {}) {
+      const modal = $('#viewerModal');
+      const img = $('#viewerImg');
+      const txt = $('#viewerText');
+      if (!modal || !img || !txt) return;
+      closeViewer(false);
+      const url = URL.createObjectURL(blob);
+      const ct = opts.contentType || '';
+      const isImage = ct.startsWith('image/');
+      if (isImage) {
+        img.src = url;
+        img.style.display = 'block';
+        txt.style.display = 'none';
+      } else {
+        img.style.display = 'none';
+        txt.style.display = 'block';
+        txt.textContent = opts.textContent || `Binary payload (${ct || 'unknown'})`;
+      }
+      document.getElementById('viewerTitle').textContent = opts.title || 'Viewing image';
+      document.getElementById('viewerNotice').textContent = opts.notice || 'Close to consume this view.';
+      modal.style.display = 'flex';
+      activeViewer = { url };
+      lastViewedContext = opts.context || null;
+    }
+
+    document.getElementById('viewerClose').addEventListener('click', () => closeViewer(true));
+    document.getElementById('viewerModal').addEventListener('click', (e) => {
+      if (e.target && e.target.id === 'viewerModal') {
+        closeViewer(true);
+      }
+    });
+
     function clearOutputs() {
-      ['uploadOut','usersOut','peersOut','listOut','leaderOut','decryptOut','loginOut','peerOut'].forEach(id => text('#'+id, ''));
+      ['uploadOut','usersOut','peersOut','listOut','leaderOut','loginOut','peerOut'].forEach(id => text('#'+id, ''));
       const img = $('#peerImg'); if (img) { img.style.display = 'none'; img.src = ''; }
+      closeViewer(false);
     }
 
     function showMainUI(show) {
@@ -779,7 +826,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     }
 
     /* P2P actions */
-    $('#peerListBtn').addEventListener('click', async () => {
+    async function refreshPeerList() {
       try {
         text('#peerOut', 'Loading image metadata...');
         const [cached, live] = await Promise.all([
@@ -791,7 +838,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const out = document.getElementById('peerOut');
         out.innerHTML = renderUserImages(merged);
       } catch (err) { text('#peerOut', String(err)); }
-    });
+    }
+
+    $('#peerListBtn').addEventListener('click', refreshPeerList);
 
     $('#peerPreviewBtn').addEventListener('click', async () => {
       const peer = ($('#peerUser').value || '').trim();
@@ -816,7 +865,10 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     $('#peerFullBtn').addEventListener('click', async () => {
       const peer = ($('#peerUser').value || '').trim();
       const imgId = ($('#peerImageId').value || '').trim();
+      const pass = ($('#peerPassphrase').value || '').trim();
+      if (!currentUser) { text('#peerOut', 'login required to view full images'); return; }
       if (!peer || !imgId) { text('#peerOut', 'peer username and image_id required'); return; }
+      if (!pass) { text('#peerOut', 'passphrase required for FULL view'); return; }
       try {
         const info = await resolvePeer(peer);
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
@@ -824,17 +876,29 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const res = await fetch(url);
         const ct = res.headers.get('content-type') || '';
         if (ct.startsWith('image/')) {
-          const blob = await res.blob();
-          const cd = res.headers.get('content-disposition') || '';
-          let fname = `${imgId}.png`;
-          const m = cd.match(/filename="([^"]+)"/i);
-          if (m) fname = m[1];
-          const dl = document.createElement('a');
-          dl.href = URL.createObjectURL(blob);
-          dl.download = fname;
-          dl.click();
-          URL.revokeObjectURL(dl.href);
-          text('#peerOut', `Downloaded encrypted image ${fname}. Decrypt via the decrypt tool.`);
+          const stegoBlob = await res.blob();
+          const fd = new FormData();
+          fd.append('file', stegoBlob, `${imgId}.png`);
+          fd.append('passphrase', pass);
+          const decRes = await fetch('/api/decrypt', { method: 'POST', body: fd });
+          if (!decRes.ok) {
+            text('#peerOut', await decRes.text());
+            return;
+          }
+          const decCt = decRes.headers.get('content-type') || '';
+          const decBlob = await decRes.blob();
+          let textPayload = null;
+          if (!decCt.startsWith('image/')) {
+            try { textPayload = await decBlob.text(); } catch (_) {}
+          }
+          openViewer(decBlob, {
+            contentType: decCt,
+            textContent: textPayload,
+            title: `Viewing ${peer}/${imgId}`,
+            notice: 'Close the viewer to refresh remaining views; nothing is saved to disk.',
+            context: { peer, imgId }
+          });
+          text('#peerOut', `Viewing decrypted image from ${peer}/${imgId}. Close the viewer when done.`);
         } else {
           const textResp = await res.text();
           text('#peerOut', textResp);
@@ -921,34 +985,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       document.getElementById('owner-requests').style.display = 'none';
     });
 
-    /* Client-side Decrypt */
-    $('#decryptForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      try {
-        const res = await fetch('/api/decrypt', { method: 'POST', body: fd });
-        if (!res.ok) {
-          text('#decryptOut', await res.text());
-          return;
-        }
-        const blob = await res.blob();
-        // Use server-provided filename if present
-        const cd = res.headers.get('Content-Disposition') || '';
-        let fname = 'decrypted.bin';
-        const m = cd.match(/filename="([^"]+)"/i);
-        if (m) fname = m[1];
-
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fname;
-        a.click();
-        URL.revokeObjectURL(url);
-        text('#decryptOut', '✅ Decryption successful — file downloaded as ' + fname);
-      } catch (err) {
-        text('#decryptOut', '❌ ' + err);
-      }
-    });
   </script>
 </body>
 </html>
@@ -1175,8 +1211,9 @@ async fn api_decrypt(
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(&content_type).unwrap());
     headers.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename)).unwrap(),
+        HeaderValue::from_str(&format!("inline; filename=\"{}\"", filename)).unwrap(),
     );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     (StatusCode::OK, headers, plaintext).into_response()
 }
 
