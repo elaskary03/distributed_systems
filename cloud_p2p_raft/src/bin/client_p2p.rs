@@ -65,6 +65,11 @@ struct RequestImage {
     views: i64,
 }
 
+#[derive(Deserialize)]
+struct ConsumeViewReq {
+    requester: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -84,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/request-image/:image_id", post(request_image))
         .route("/approve-request/:image_id", post(approve_request))
         .route("/reject-request/:image_id", post(reject_request))
+        .route("/consume-view/:image_id", post(consume_view))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -315,11 +321,8 @@ async fn full_image(
         if quota <= 0 {
             return (StatusCode::OK, "QUOTA_EXHAUSTED").into_response();
         }
-        meta.permissions.insert(requester.clone(), quota - 1);
-        meta.last_update_ns = now_nanos();
-        let _ = save_metadata(&paths.meta, &image_id, &meta).await;
-        let _ = replay_pending(&paths.meta, &image_id).await;
-        }
+        // No decrement here; handled by /consume-view after successful decrypt
+    }
 
     match load_image(&paths.encrypted, &image_id).await {
         Ok(bytes) => {
@@ -379,6 +382,38 @@ async fn request_image(
     }
 
     Json(json!({"status":"queued","viewer": body.requester})).into_response()
+}
+
+async fn consume_view(
+    State(st): State<AppState>,
+    AxumPath(image_id): AxumPath<String>,
+    Json(body): Json<ConsumeViewReq>,
+) -> impl axum::response::IntoResponse {
+    if body.requester.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "requester required").into_response();
+    }
+    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
+    if load_image(&paths.encrypted, &image_id).await.is_err() {
+        return (StatusCode::NOT_FOUND, "image not found").into_response();
+    }
+    let mut meta = match load_metadata(&paths.meta, &image_id).await {
+        Ok(m) => m,
+        Err(_) => return (StatusCode::NOT_FOUND, "metadata not found").into_response(),
+    };
+
+    if body.requester != meta.owner {
+        let entry = meta.permissions.entry(body.requester.clone()).or_insert(0);
+        if *entry <= 0 {
+            return (StatusCode::OK, "QUOTA_EXHAUSTED").into_response();
+        }
+        *entry -= 1;
+    }
+    meta.last_update_ns = now_nanos();
+    ensure_owner_default_perm(&mut meta);
+    let _ = save_metadata(&paths.meta, &image_id, &meta).await;
+    let _ = replay_pending(&paths.meta, &image_id).await;
+
+    Json(json!({"status":"ok","remaining": meta.permissions.get(&body.requester).copied().unwrap_or(0)})).into_response()
 }
 
 async fn approve_request(

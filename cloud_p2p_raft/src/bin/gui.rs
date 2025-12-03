@@ -887,6 +887,15 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           }
           const decCt = decRes.headers.get('content-type') || '';
           const decBlob = await decRes.blob();
+          // Mark the view as consumed only after successful decrypt
+          try {
+            const consumeUrl = `http://${info.ip}:${info.port}/consume-view/${encodeURIComponent(imgId)}`;
+            await fetch(consumeUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ requester: currentUser })
+            });
+          } catch (_) {}
           let textPayload = null;
           if (!decCt.startsWith('image/')) {
             try { textPayload = await decBlob.text(); } catch (_) {}
