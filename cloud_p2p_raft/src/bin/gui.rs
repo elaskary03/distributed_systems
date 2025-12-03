@@ -449,6 +449,25 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let lastViewedContext = null;
     const launchStatus = (msg) => { text('#loginOut', msg); document.getElementById('loginOut').style.display = 'block'; };
 
+    function sendOfflineBeacon() {
+      if (!currentUser) return;
+      try {
+        const payload = JSON.stringify({ user: currentUser });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon('/api/unregister', new Blob([payload], { type: 'application/json' }));
+        } else {
+          fetch('/api/unregister', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+            keepalive: true
+          }).catch(() => {});
+        }
+      } catch (_) {}
+    }
+    window.addEventListener('beforeunload', sendOfflineBeacon);
+    window.addEventListener('pagehide', sendOfflineBeacon);
+
     async function startLocalClient(user, port = DEFAULT_P2P_PORT) {
       try {
         const res = await fetch('/api/launcher/launch', {

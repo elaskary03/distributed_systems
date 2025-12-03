@@ -573,43 +573,52 @@ async fn query_any(seeds: &[SocketAddr], cmd_line: &str) -> anyhow::Result<Strin
     Err(anyhow::anyhow!("no node responded"))
 }
 
-async fn read_multiline(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<String> {
-    let mut s = TcpStream::connect(addr).await?;
-    let (r, mut w) = s.split();
-    let mut reader = BufReader::new(r);
+async fn read_multiline(mut addr: SocketAddr, cmd_line: &str) -> anyhow::Result<String> {
+    for _ in 0..=3 {
+        let mut s = TcpStream::connect(addr).await?;
+        let (r, mut w) = s.split();
+        let mut reader = BufReader::new(r);
 
-    // banner
-    let mut tmp = String::new();
-    reader.read_line(&mut tmp).await?;
-    tmp.clear();
-    reader.read_line(&mut tmp).await?;
+        // banner
+        let mut tmp = String::new();
+        reader.read_line(&mut tmp).await?;
+        tmp.clear();
+        reader.read_line(&mut tmp).await?;
 
-    w.write_all(cmd_line.as_bytes()).await?;
-    w.write_all(b"\n").await?;
+        w.write_all(cmd_line.as_bytes()).await?;
+        w.write_all(b"\n").await?;
 
-    let mut out = String::new();
-    loop {
-        let mut buf = String::new();
-        tokio::select! {
-            n = reader.read_line(&mut buf) => {
-                let n = n?;
-                if n == 0 { break; }
-                out.push_str(&buf);
-                // Only LEADER is guaranteed single-line; keep it snappy.
-                if cmd_line == "LEADER" {
+        let mut out = String::new();
+        loop {
+            let mut buf = String::new();
+            tokio::select! {
+                n = reader.read_line(&mut buf) => {
+                    let n = n?;
+                    if n == 0 { break; }
+                    out.push_str(&buf);
+                    // Only LEADER is guaranteed single-line; keep it snappy.
+                    if cmd_line == "LEADER" {
+                        break;
+                    }
+                }
+                _ = sleep(Duration::from_millis(100)) => {
+                    // brief idle; assume node finished writing
                     break;
                 }
             }
-            _ = sleep(Duration::from_millis(100)) => {
-                // brief idle; assume node finished writing
-                break;
+        }
+        if out.is_empty() {
+            anyhow::bail!("empty reply");
+        }
+        if let Some(first) = out.lines().next() {
+            if let Some(rest) = first.trim().strip_prefix("REDIRECT ") {
+                addr = rest.parse()?;
+                continue;
             }
         }
+        return Ok(out);
     }
-    if out.is_empty() {
-        anyhow::bail!("empty reply");
-    }
-    Ok(out)
+    anyhow::bail!("redirect loop")
 }
 
 async fn find_leader(seeds: &[SocketAddr]) -> anyhow::Result<Option<String>> {
