@@ -1622,9 +1622,24 @@ async fn read_multiline(proxy_addr: &str, cmd_line: &str) -> anyhow::Result<Stri
 small utils
 ========================= */
 fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    let mut out: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if out.is_empty() {
+        out.push_str("file");
+    }
+    // Avoid path traversal
+    while out.contains('/') {
+        out = out.replace('/', "-");
+    }
+    out
 }
 
 fn now_nanos() -> u128 {
