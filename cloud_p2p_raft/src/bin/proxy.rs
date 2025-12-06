@@ -26,7 +26,7 @@ struct Args {
     listen: String,
 
     /// Public base URL for the GUI/static file server (needed when nodes run on other hosts), e.g. http://192.168.1.10:8080
-    #[arg(long, env = "CLOUDP2P_PUBLIC_BASE")]
+    #[arg(long)]
     public_base: Option<String>,
 
     /// Comma-separated list of seed client API addresses (node-facing), e.g. 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003
@@ -64,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
         .collect::<Result<_, _>>()?;
     let public_base = args
         .public_base
+        .or_else(|| env::var("CLOUDP2P_PUBLIC_BASE").ok())
         .as_deref()
         .map(|s| s.trim_end_matches('/').to_string());
 
