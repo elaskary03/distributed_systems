@@ -70,7 +70,10 @@ pub fn unpack_embed_blob(data: &[u8]) -> Result<(Nonce, Vec<u8>)> {
     let cipher_len = u32::from_be_bytes(len_bytes.try_into().unwrap()) as usize;
 
     if data.len() < 16 + cipher_len {
-        bail!("embed blob truncated (expected {} bytes of ciphertext)", cipher_len);
+        bail!(
+            "embed blob truncated (expected {} bytes of ciphertext)",
+            cipher_len
+        );
     }
 
     let mut nonce_arr = [0u8; 12];
@@ -231,7 +234,10 @@ pub fn encrypt_and_embed_to_png(
     // Encode stego image as PNG bytes
     let mut stego_bytes = Vec::new();
     stego_img
-        .write_to(&mut std::io::Cursor::new(&mut stego_bytes), ImageOutputFormat::Png)
+        .write_to(
+            &mut std::io::Cursor::new(&mut stego_bytes),
+            ImageOutputFormat::Png,
+        )
         .context("encode stego PNG")?;
 
     // Compute stats
@@ -243,10 +249,7 @@ pub fn encrypt_and_embed_to_png(
 
 /// Extracts the embedded payload from a stego PNG and decrypts it with the passphrase.
 /// Returns the original plaintext bytes.
-pub fn extract_and_decrypt_from_png(
-    passphrase: &[u8],
-    stego_png_bytes: &[u8],
-) -> Result<Vec<u8>> {
+pub fn extract_and_decrypt_from_png(passphrase: &[u8], stego_png_bytes: &[u8]) -> Result<Vec<u8>> {
     // 1) Decode PNG -> RGBA
     let rgba = image::load_from_memory(stego_png_bytes)
         .context("decode stego PNG")?
@@ -256,8 +259,8 @@ pub fn extract_and_decrypt_from_png(
     let (nonce, ciphertext) = extract_payload(&rgba)?;
 
     // 3) Decrypt
-    let plaintext = decrypt_bytes(passphrase, &nonce, &ciphertext)
-        .context("decrypt embedded ciphertext")?;
+    let plaintext =
+        decrypt_bytes(passphrase, &nonce, &ciphertext).context("decrypt embedded ciphertext")?;
 
     Ok(plaintext)
 }

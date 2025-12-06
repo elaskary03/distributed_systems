@@ -5,17 +5,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use bytes::Bytes;
 use clap::Parser;
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{
-    env, fs,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-    process::Stdio,
-};
+use std::{env, fs, net::SocketAddr, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     fs as tokio_fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -25,7 +20,6 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tower_http::services::ServeDir;
-use rand_core::{OsRng, RngCore};
 
 // 🔐 client-side decryption uses the same helpers as the cluster
 use cloud_p2p_raft::crypto::{decrypt_bytes, extract_payload};
@@ -46,7 +40,7 @@ struct Args {
 struct AppState {
     proxy_addr: Arc<String>,
     uploads_dir: Arc<PathBuf>,
-    stego_dir: Arc<PathBuf>,   // NEW: serve and scan the stego/ folder
+    stego_dir: Arc<PathBuf>, // NEW: serve and scan the stego/ folder
     launcher_dir: Arc<PathBuf>,
     launcher: Arc<Mutex<std::collections::HashMap<String, ManagedChild>>>,
 }
@@ -60,8 +54,8 @@ struct ManagedChild {
 }
 
 /* =========================
-   API payloads
-   ========================= */
+API payloads
+========================= */
 #[derive(Deserialize)]
 struct RegisterReq {
     user: String,
@@ -81,11 +75,18 @@ struct UploadResp {
 }
 
 #[derive(Serialize)]
-struct FindStegoResp { stego_path: String }
+struct FindStegoResp {
+    stego_path: String,
+}
+
+#[derive(Serialize)]
+struct UploadStegoResp {
+    path: String,
+}
 
 /* =========================
-   main
-   ========================= */
+main
+========================= */
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -95,13 +96,13 @@ async fn main() -> anyhow::Result<()> {
     let stego_dir = base_dir.join("stego"); // NEW
     let launcher_dir = base_dir.join("launcher");
     fs::create_dir_all(&uploads_dir).ok();
-    fs::create_dir_all(&stego_dir).ok();   // NEW
+    fs::create_dir_all(&stego_dir).ok(); // NEW
     fs::create_dir_all(&launcher_dir).ok();
 
     let state = AppState {
         proxy_addr: Arc::new(args.proxy_addr),
         uploads_dir: Arc::new(uploads_dir.clone()),
-        stego_dir: Arc::new(stego_dir.clone()),    // NEW
+        stego_dir: Arc::new(stego_dir.clone()), // NEW
         launcher_dir: Arc::new(launcher_dir.clone()),
         launcher: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
@@ -131,8 +132,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/list", get(api_list))
         .route("/api/images", get(api_images))
         .route("/api/upload", post(api_upload))
-        .route("/api/decrypt", post(api_decrypt))         // client-side decrypt
-        .route("/api/find-stego", get(api_find_stego))    // stego discovery for auto-download
+        .route("/api/upload-stego", post(api_upload_stego))
+        .route("/api/decrypt", post(api_decrypt)) // client-side decrypt
+        .route("/api/find-stego", get(api_find_stego)) // stego discovery for auto-download
         .route("/api/launcher/list", get(api_launcher_list))
         .route("/api/launcher/launch", post(api_launcher_launch))
         .route("/api/launcher/stop", post(api_launcher_stop))
@@ -147,8 +149,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /* =========================
-   UI (HTML) – light theme, robust layout
-   ========================= */
+UI (HTML) – light theme, robust layout
+========================= */
 async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     const PAGE: &str = r#"<!doctype html>
 <html>
@@ -1133,13 +1135,16 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let page = PAGE.replace("{{WS_URL}}", &ws_url);
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        "text/html; charset=utf-8".parse().unwrap(),
+    );
     (StatusCode::OK, headers, Html(page))
 }
 
 /* =========================
-   API handlers
-   ========================= */
+API handlers
+========================= */
 
 async fn api_register(
     State(st): State<AppState>,
@@ -1149,7 +1154,9 @@ async fn api_register(
         return (StatusCode::BAD_REQUEST, "user and ip are required").into_response();
     }
     let line = format!("REGISTER {} {}", payload.user, payload.ip);
-    proxy_send_oneline(&st.proxy_addr, &line).await.into_response()
+    proxy_send_oneline(&st.proxy_addr, &line)
+        .await
+        .into_response()
 }
 
 async fn api_unregister(
@@ -1160,20 +1167,30 @@ async fn api_unregister(
         return (StatusCode::BAD_REQUEST, "user is required").into_response();
     }
     let line = format!("UNREGISTER {}", payload.user);
-    proxy_send_oneline(&st.proxy_addr, &line).await.into_response()
+    proxy_send_oneline(&st.proxy_addr, &line)
+        .await
+        .into_response()
 }
 
 async fn api_leader(State(st): State<AppState>) -> impl IntoResponse {
-    proxy_send_multiline(&st.proxy_addr, "LEADER").await.into_response()
+    proxy_send_multiline(&st.proxy_addr, "LEADER")
+        .await
+        .into_response()
 }
 async fn api_users(State(st): State<AppState>) -> impl IntoResponse {
-    proxy_send_multiline(&st.proxy_addr, "SHOW_USERS").await.into_response()
+    proxy_send_multiline(&st.proxy_addr, "SHOW_USERS")
+        .await
+        .into_response()
 }
 async fn api_peers(State(st): State<AppState>) -> impl IntoResponse {
-    proxy_send_multiline(&st.proxy_addr, "LIST_PEERS").await.into_response()
+    proxy_send_multiline(&st.proxy_addr, "LIST_PEERS")
+        .await
+        .into_response()
 }
 async fn api_list(State(st): State<AppState>) -> impl IntoResponse {
-    proxy_send_multiline(&st.proxy_addr, "LIST").await.into_response()
+    proxy_send_multiline(&st.proxy_addr, "LIST")
+        .await
+        .into_response()
 }
 async fn api_images(State(st): State<AppState>) -> impl IntoResponse {
     let (status, body) = proxy_send_multiline(&st.proxy_addr, "IMAGE_METADATA").await;
@@ -1187,12 +1204,9 @@ async fn api_images(State(st): State<AppState>) -> impl IntoResponse {
 }
 
 /* =========================
-   Upload handler (encrypt-on-cloud trigger)
-   ========================= */
-async fn api_upload(
-    State(st): State<AppState>,
-    mut mp: Multipart,
-) -> impl IntoResponse {
+Upload handler (encrypt-on-cloud trigger)
+========================= */
+async fn api_upload(State(st): State<AppState>, mut mp: Multipart) -> impl IntoResponse {
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut filename: String = "upload".to_string();
     let mut passphrase: Option<String> = None;
@@ -1223,7 +1237,11 @@ async fn api_upload(
         .join(format!("{}-{}", image_id, sanitize(&filename)));
 
     if let Err(e) = tokio_fs::write(&original_path, &bytes).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("write original: {e}")).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("write original: {e}"),
+        )
+            .into_response();
     }
 
     // Ask the proxy to coordinate the cluster-side encryption/stego
@@ -1244,8 +1262,51 @@ async fn api_upload(
 }
 
 /* =========================
-   Find stego path for an image_id (search both uploads/ and stego/)
-   ========================= */
+Accept stego uploads from nodes (HTTP POST body)
+========================= */
+async fn api_upload_stego(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: Bytes,
+) -> impl IntoResponse {
+    if body.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty body").into_response();
+    }
+
+    let image_id = q
+        .get("image_id")
+        .cloned()
+        .unwrap_or_else(|| format!("stego-{}", now_nanos()));
+    let filename = q
+        .get("filename")
+        .cloned()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("{}.png", image_id));
+    let sanitized = sanitize(&filename);
+
+    let path = st.stego_dir.join(&sanitized);
+    if let Some(parent) = path.parent() {
+        let _ = tokio_fs::create_dir_all(parent).await;
+    }
+
+    if let Err(e) = tokio_fs::write(&path, &body).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("write stego: {e}"),
+        )
+            .into_response();
+    }
+
+    let served = format!(
+        "/files/stego/{}",
+        path.file_name().unwrap().to_string_lossy()
+    );
+    (StatusCode::OK, Json(UploadStegoResp { path: served })).into_response()
+}
+
+/* =========================
+Find stego path for an image_id (search both uploads/ and stego/)
+========================= */
 async fn api_find_stego(
     State(st): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -1261,7 +1322,9 @@ async fn api_find_stego(
                 let name = entry.file_name().to_string_lossy().to_string();
                 let lower = name.to_lowercase();
                 if lower.contains(&image_id.to_lowercase())
-                    && (lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg"))
+                    && (lower.ends_with(".png")
+                        || lower.ends_with(".jpg")
+                        || lower.ends_with(".jpeg"))
                 {
                     return Some(format!("{}/{}", web_prefix, name));
                 }
@@ -1283,11 +1346,9 @@ async fn api_find_stego(
 }
 
 /* =========================
-   Client-side Decrypt handler
-   ========================= */
-async fn api_decrypt(
-    mut mp: Multipart,
-) -> impl IntoResponse {
+Client-side Decrypt handler
+========================= */
+async fn api_decrypt(mut mp: Multipart) -> impl IntoResponse {
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut passphrase: Option<String> = None;
 
@@ -1318,7 +1379,9 @@ async fn api_decrypt(
     // Extract (nonce, ciphertext) from LSBs and decrypt
     let (nonce, ciphertext) = match extract_payload(&img_rgba) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("extract payload: {e}")).into_response(),
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("extract payload: {e}")).into_response()
+        }
     };
 
     let plaintext = match decrypt_bytes(pass.as_bytes(), &nonce, &ciphertext) {
@@ -1331,23 +1394,29 @@ async fn api_decrypt(
         Ok(fmt) => {
             use image::ImageFormat::*;
             let (ct, ext) = match fmt {
-                Png  => ("image/png",  "png"),
+                Png => ("image/png", "png"),
                 Jpeg => ("image/jpeg", "jpg"),
-                Gif  => ("image/gif",  "gif"),
-                Bmp  => ("image/bmp",  "bmp"),
+                Gif => ("image/gif", "gif"),
+                Bmp => ("image/bmp", "bmp"),
                 Tiff => ("image/tiff", "tiff"),
-                Ico  => ("image/x-icon","ico"),
+                Ico => ("image/x-icon", "ico"),
                 WebP => ("image/webp", "webp"),
                 Avif => ("image/avif", "avif"),
-                _    => ("application/octet-stream", "bin"),
+                _ => ("application/octet-stream", "bin"),
             };
             (ct.to_string(), format!("decrypted.{}", ext))
         }
-        Err(_) => ("application/octet-stream".to_string(), "decrypted.bin".to_string()),
+        Err(_) => (
+            "application/octet-stream".to_string(),
+            "decrypted.bin".to_string(),
+        ),
     };
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(&content_type).unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&content_type).unwrap(),
+    );
     headers.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!("inline; filename=\"{}\"", filename)).unwrap(),
@@ -1357,8 +1426,8 @@ async fn api_decrypt(
 }
 
 /* =========================
-   Local client launcher
-   ========================= */
+Local client launcher
+========================= */
 #[derive(Deserialize)]
 struct LaunchReq {
     user: String,
@@ -1374,10 +1443,22 @@ async fn api_launcher_list(State(st): State<AppState>) -> impl IntoResponse {
     let map = st.launcher.lock().await;
     let mut entries: Vec<String> = map
         .iter()
-        .map(|(u, child)| format!("{}: pid={} port={} log={}", u, child.pid, child.port, child.log_path.display()))
+        .map(|(u, child)| {
+            format!(
+                "{}: pid={} port={} log={}",
+                u,
+                child.pid,
+                child.port,
+                child.log_path.display()
+            )
+        })
         .collect();
     entries.sort();
-    let body = if entries.is_empty() { "no local clients".to_string() } else { entries.join("\n") };
+    let body = if entries.is_empty() {
+        "no local clients".to_string()
+    } else {
+        entries.join("\n")
+    };
     (StatusCode::OK, body).into_response()
 }
 
@@ -1399,31 +1480,55 @@ async fn api_launcher_launch(
     let log_path = st.launcher_dir.join(format!("{}.log", user));
     let log_file = match std::fs::File::create(&log_path) {
         Ok(f) => f,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("log create: {e}")).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("log create: {e}"),
+            )
+                .into_response()
+        }
     };
     let mut cmd = Command::new("cargo");
     cmd.arg("run")
-        .arg("--bin").arg("client_p2p")
+        .arg("--bin")
+        .arg("client_p2p")
         .arg("--")
-        .arg("--user").arg(user)
-        .arg("--port").arg(payload.port.to_string())
+        .arg("--user")
+        .arg(user)
+        .arg("--port")
+        .arg(payload.port.to_string())
         .stdout(Stdio::from(log_file.try_clone().unwrap()))
         .stderr(Stdio::from(log_file));
 
     let child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("spawn: {e}")).into_response(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("spawn: {e}")).into_response()
+        }
     };
     let pid = child.id().unwrap_or(0);
 
-    st.launcher.lock().await.insert(user.to_string(), ManagedChild {
-        pid,
-        port: payload.port,
-        log_path: log_path.clone(),
-        child,
-    });
+    st.launcher.lock().await.insert(
+        user.to_string(),
+        ManagedChild {
+            pid,
+            port: payload.port,
+            log_path: log_path.clone(),
+            child,
+        },
+    );
 
-    (StatusCode::OK, format!("launched {} on port {} (pid {}) log={}", user, payload.port, pid, log_path.display())).into_response()
+    (
+        StatusCode::OK,
+        format!(
+            "launched {} on port {} (pid {}) log={}",
+            user,
+            payload.port,
+            pid,
+            log_path.display()
+        ),
+    )
+        .into_response()
 }
 
 async fn api_launcher_stop(
@@ -1444,8 +1549,8 @@ async fn api_launcher_stop(
 }
 
 /* =========================
-   Proxy bridge helpers
-   ========================= */
+Proxy bridge helpers
+========================= */
 async fn proxy_send_oneline(proxy_addr: &str, cmd_line: &str) -> (StatusCode, String) {
     match talk_once(proxy_addr, cmd_line).await {
         Ok(s) => (StatusCode::OK, s),
@@ -1514,8 +1619,8 @@ async fn read_multiline(proxy_addr: &str, cmd_line: &str) -> anyhow::Result<Stri
 }
 
 /* =========================
-   small utils
-   ========================= */
+small utils
+========================= */
 fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -1534,7 +1639,14 @@ fn now_nanos() -> u128 {
 fn next_op_id() -> String {
     let mut r = [0u8; 4];
     OsRng.fill_bytes(&mut r);
-    format!("gui-{}-{:02x}{:02x}{:02x}{:02x}", now_nanos(), r[0], r[1], r[2], r[3])
+    format!(
+        "gui-{}-{:02x}{:02x}{:02x}{:02x}",
+        now_nanos(),
+        r[0],
+        r[1],
+        r[2],
+        r[3]
+    )
 }
 
 fn get_data_dir() -> PathBuf {

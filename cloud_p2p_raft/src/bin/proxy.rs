@@ -1,17 +1,22 @@
 use clap::{Parser, ValueEnum};
+use futures::{SinkExt, StreamExt};
 use rand::{distributions::Alphanumeric, Rng};
-use std::{env, fs, net::SocketAddr, path::{Path, PathBuf}, str::FromStr, time::Duration};
+use std::{
+    env, fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::broadcast,
     time::{sleep, timeout},
 };
-use futures::{StreamExt, SinkExt};
 use tokio_tungstenite::accept_async;
 
-use cloud_p2p_raft::crypto::{extract_payload, decrypt_bytes};
-
+use cloud_p2p_raft::crypto::{decrypt_bytes, extract_payload};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -19,6 +24,10 @@ struct Args {
     /// Proxy listen address (what your users connect to), e.g. 0.0.0.0:9100
     #[arg(long, default_value = "0.0.0.0:9100")]
     listen: String,
+
+    /// Public base URL for the GUI/static file server (needed when nodes run on other hosts), e.g. http://192.168.1.10:8080
+    #[arg(long, env = "CLOUDP2P_PUBLIC_BASE")]
+    public_base: Option<String>,
 
     /// Comma-separated list of seed client API addresses (node-facing), e.g. 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003
     #[arg(long)]
@@ -53,10 +62,21 @@ async fn main() -> anyhow::Result<()> {
         .split(',')
         .map(|s| SocketAddr::from_str(s.trim()))
         .collect::<Result<_, _>>()?;
+    let public_base = args
+        .public_base
+        .as_deref()
+        .map(|s| s.trim_end_matches('/').to_string());
 
     let listener = TcpListener::bind(listen_addr).await?;
     println!("🔗 Proxy listening on {}", listen_addr);
     println!("   Using seeds: {:?}", seeds);
+    if let Some(base) = &public_base {
+        println!("   Public base for uploads/stego: {}", base);
+    } else {
+        println!(
+            "   NOTE: set --public-base or CLOUDP2P_PUBLIC_BASE when nodes run on different hosts"
+        );
+    }
 
     // Broadcast channel for user list updates to WS clients
     let (ws_tx, _) = broadcast::channel::<String>(32);
@@ -70,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
             first_try: args.first_try,
             max_retries: args.max_retries,
             backoff_ms: args.backoff_ms,
+            public_base: public_base.clone(),
         };
         let ws_tx = ws_tx.clone();
         let ws_tx_client = ws_tx.clone();
@@ -98,6 +119,7 @@ struct ProxyCfg {
     first_try: FirstTry,
     max_retries: usize,
     backoff_ms: u64,
+    public_base: Option<String>,
 }
 
 /// WebSocket handler: auto-register on open, auto-unregister on disconnect; broadcast SHOW_USERS updates.
@@ -218,11 +240,17 @@ async fn handle_client(
                 // mutate with idempotent SUBMIT
                 let user = match parts.next() {
                     Some(x) => x,
-                    None => { w.write_all(b"Usage: REGISTER <user> <ip>\n").await?; continue; }
+                    None => {
+                        w.write_all(b"Usage: REGISTER <user> <ip>\n").await?;
+                        continue;
+                    }
                 };
                 let ip = match parts.next() {
                     Some(x) => x,
-                    None => { w.write_all(b"Usage: REGISTER <user> <ip>\n").await?; continue; }
+                    None => {
+                        w.write_all(b"Usage: REGISTER <user> <ip>\n").await?;
+                        continue;
+                    }
                 };
                 let port = parts.next().unwrap_or("10000");
 
@@ -239,7 +267,10 @@ async fn handle_client(
             "UNREGISTER" => {
                 let user = match parts.next() {
                     Some(x) => x,
-                    None => { w.write_all(b"Usage: UNREGISTER <user>\n").await?; continue; }
+                    None => {
+                        w.write_all(b"Usage: UNREGISTER <user>\n").await?;
+                        continue;
+                    }
                 };
 
                 let op_id = next_op_id();
@@ -260,26 +291,20 @@ async fn handle_client(
                 }
             }
 
-            "LIST_PEERS" => {
-                match query_any(&seeds, "LIST_PEERS").await {
-                    Ok(s) => w.write_all(s.as_bytes()).await?,
-                    Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
-                }
-            }
+            "LIST_PEERS" => match query_any(&seeds, "LIST_PEERS").await {
+                Ok(s) => w.write_all(s.as_bytes()).await?,
+                Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
+            },
 
-            "IMAGE_METADATA" => {
-                match query_any(&seeds, "IMAGE_METADATA").await {
-                    Ok(s) => w.write_all(s.as_bytes()).await?,
-                    Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
-                }
-            }
+            "IMAGE_METADATA" => match query_any(&seeds, "IMAGE_METADATA").await {
+                Ok(s) => w.write_all(s.as_bytes()).await?,
+                Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
+            },
 
-            "LIST" => {
-                match query_any(&seeds, "LIST").await {
-                    Ok(s) => w.write_all(s.as_bytes()).await?,
-                    Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
-                }
-            }
+            "LIST" => match query_any(&seeds, "LIST").await {
+                Ok(s) => w.write_all(s.as_bytes()).await?,
+                Err(e) => w.write_all(format!("ERR {}\n", e).as_bytes()).await?,
+            },
 
             "LEADER" => {
                 // Try to discover the leader by asking nodes
@@ -291,121 +316,217 @@ async fn handle_client(
             }
 
             "ENCRYPT_IMAGE" => {
-            // Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
-            let id = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
-            let pass = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
-            let input_path = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
-            let output_path = match parts.next() {
-                Some(x) => x,
-                None => { w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?; continue; }
-            };
+                // Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
+                let id = match parts.next() {
+                    Some(x) => x,
+                    None => {
+                        w.write_all(
+                            b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n",
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let pass = match parts.next() {
+                    Some(x) => x,
+                    None => {
+                        w.write_all(
+                            b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n",
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let input_path = match parts.next() {
+                    Some(x) => x,
+                    None => {
+                        w.write_all(
+                            b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n",
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let output_path = match parts.next() {
+                    Some(x) => x,
+                    None => {
+                        w.write_all(
+                            b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n",
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
 
-            let op_id = next_op_id();
-            let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}", op_id, id, pass, input_path, output_path);
-            let resp = submit_idempotent(&seeds, &cfg, &payload).await;
-            write_line(&mut w, resp).await?;
+                let op_id = next_op_id();
+                let payload = format!(
+                    "SUBMIT {} ENCRYPT_IMAGE {} {} {} {}",
+                    op_id, id, pass, input_path, output_path
+                );
+                let resp = submit_idempotent(&seeds, &cfg, &payload).await;
+                write_line(&mut w, resp).await?;
             }
 
             "ENCRYPT_ON_CLOUD" => {
-            // Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>
-            let image_id = match parts.next() {
-                Some(x) if !x.is_empty() => x,
-                _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n").await?; continue; }
-            };
-            let pass = match parts.next() {
-                Some(x) => x,
-                _ => { w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n").await?; continue; }
-            };
+                // Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>
+                let image_id = match parts.next() {
+                    Some(x) if !x.is_empty() => x,
+                    _ => {
+                        w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n")
+                            .await?;
+                        continue;
+                    }
+                };
+                let pass = match parts.next() {
+                    Some(x) => x,
+                    _ => {
+                        w.write_all(b"Usage: ENCRYPT_ON_CLOUD <image_id> <passphrase>\n")
+                            .await?;
+                        continue;
+                    }
+                };
 
-            // Find the uploaded file saved by the GUI (pattern: uploads/<image_id>-<original_name>)
-            let uploads_dir = get_data_dir().join("uploads");
-            let input_path = match find_upload_by_prefix(&uploads_dir, image_id) {
-                Ok(p) => p,
-                Err(e) => {
-                    w.write_all(format!("ERR input not found: {}\n", e).as_bytes()).await?;
+                // Find the uploaded file saved by the GUI (pattern: uploads/<image_id>-<original_name>)
+                let uploads_dir = get_data_dir().join("uploads");
+                let input_path = match find_upload_by_prefix(&uploads_dir, image_id) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        w.write_all(format!("ERR input not found: {}\n", e).as_bytes())
+                            .await?;
+                        continue;
+                    }
+                };
+
+                // Build inputs/outputs depending on whether a public base URL is configured.
+                // When nodes run on other hosts, we hand them HTTP URLs they can fetch/post.
+                let upload_name = Path::new(&input_path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| format!("{}.bin", image_id));
+
+                let (input_arg, output_arg) = if let Some(base) = &cfg.public_base {
+                    let base = base.trim_end_matches('/');
+                    let input_url = format!("{}/files/uploads/{}", base, upload_name);
+                    // Nodes will POST the stego PNG back here
+                    let output_url = format!("{}/api/upload-stego?image_id={}", base, image_id);
+                    (input_url, output_url)
+                } else {
+                    // Legacy single-host mode: read/write local files
+                    let output_path = get_data_dir()
+                        .join("stego")
+                        .join(format!("{}.png", image_id));
+                    if let Some(parent) = Path::new(&output_path).parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    (
+                        input_path.clone(),
+                        output_path.to_string_lossy().to_string(),
+                    )
+                };
+
+                let op_id = next_op_id();
+                let payload = format!(
+                    "SUBMIT {} ENCRYPT_IMAGE {} {} {} {}",
+                    op_id, image_id, pass, input_arg, output_arg
+                );
+
+                let resp = submit_idempotent(&seeds, &cfg, &payload).await;
+                write_line(&mut w, resp).await?;
+            }
+            "DECRYPT_IMAGE" => {
+                // Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>
+                let pass = match parts.next() {
+                    Some(x) => x,
+                    None => {
+                        w.write_all(
+                            b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n",
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let stego_path = match parts.next() {
+                    Some(x) => x,
+                    None => {
+                        w.write_all(
+                            b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n",
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let output_path = match parts.next() {
+                    Some(x) => x,
+                    None => {
+                        w.write_all(
+                            b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n",
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+
+                // Read the stego PNG
+                let bytes = match fs::read(stego_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        w.write_all(format!("ERR read stego: {e}\n").as_bytes())
+                            .await?;
+                        continue;
+                    }
+                };
+
+                // Decode image -> RGBA
+                let img = match image::load_from_memory(&bytes) {
+                    Ok(i) => i.to_rgba8(),
+                    Err(e) => {
+                        w.write_all(format!("ERR decode stego PNG: {e}\n").as_bytes())
+                            .await?;
+                        continue;
+                    }
+                };
+
+                // Extract payload (nonce + ciphertext)
+                let (nonce, ciphertext) = match extract_payload(&img) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        w.write_all(format!("ERR extract payload: {e}\n").as_bytes())
+                            .await?;
+                        continue;
+                    }
+                };
+
+                // Decrypt
+                let plaintext = match decrypt_bytes(pass.as_bytes(), &nonce, &ciphertext) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        w.write_all(format!("ERR decrypt embedded ciphertext: {e}\n").as_bytes())
+                            .await?;
+                        continue;
+                    }
+                };
+
+                // Ensure output dir exists
+                if let Some(parent) = Path::new(output_path).parent() {
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        w.write_all(format!("ERR create_dir_all {:?}: {e}\n", parent).as_bytes())
+                            .await?;
+                        continue;
+                    }
+                }
+
+                // Write recovered bytes
+                if let Err(e) = fs::write(output_path, &plaintext) {
+                    w.write_all(format!("ERR write output: {e}\n").as_bytes())
+                        .await?;
                     continue;
                 }
-            };
 
-            // Output goes to stego/<image_id>.png (uniform & predictable)
-            let output_path = get_data_dir().join("stego").join(format!("{}.png", image_id));
-            if let Some(parent) = Path::new(&output_path).parent() {
-                let _ = fs::create_dir_all(parent);
+                w.write_all(b"OK\n").await?;
             }
-
-            let op_id = next_op_id();
-            let payload = format!("SUBMIT {} ENCRYPT_IMAGE {} {} {} {}",
-                op_id, image_id, pass, input_path, output_path.to_string_lossy());
-
-            let resp = submit_idempotent(&seeds, &cfg, &payload).await;
-            write_line(&mut w, resp).await?;
-        }
-        "DECRYPT_IMAGE" => {
-        // Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>
-        let pass = match parts.next() {
-            Some(x) => x,
-            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
-        };
-        let stego_path = match parts.next() {
-            Some(x) => x,
-            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
-        };
-        let output_path = match parts.next() {
-            Some(x) => x,
-            None => { w.write_all(b"Usage: DECRYPT_IMAGE <passphrase> <stego_png> <output_path>\n").await?; continue; }
-        };
-
-        // Read the stego PNG
-        let bytes = match fs::read(stego_path) {
-            Ok(b) => b,
-            Err(e) => { w.write_all(format!("ERR read stego: {e}\n").as_bytes()).await?; continue; }
-        };
-
-        // Decode image -> RGBA
-        let img = match image::load_from_memory(&bytes) {
-            Ok(i) => i.to_rgba8(),
-            Err(e) => { w.write_all(format!("ERR decode stego PNG: {e}\n").as_bytes()).await?; continue; }
-        };
-
-        // Extract payload (nonce + ciphertext)
-        let (nonce, ciphertext) = match extract_payload(&img) {
-            Ok(t) => t,
-            Err(e) => { w.write_all(format!("ERR extract payload: {e}\n").as_bytes()).await?; continue; }
-        };
-
-        // Decrypt
-        let plaintext = match decrypt_bytes(pass.as_bytes(), &nonce, &ciphertext) {
-            Ok(p) => p,
-            Err(e) => { w.write_all(format!("ERR decrypt embedded ciphertext: {e}\n").as_bytes()).await?; continue; }
-        };
-
-        // Ensure output dir exists
-        if let Some(parent) = Path::new(output_path).parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                w.write_all(format!("ERR create_dir_all {:?}: {e}\n", parent).as_bytes()).await?;
-                continue;
-            }
-        }
-
-        // Write recovered bytes
-        if let Err(e) = fs::write(output_path, &plaintext) {
-            w.write_all(format!("ERR write output: {e}\n").as_bytes()).await?;
-            continue;
-        }
-
-        w.write_all(b"OK\n").await?;
-    }
             _ => {
-                w.write_all(format!("ERR unknown command: {}\n", cmd).as_bytes()).await?;
+                w.write_all(format!("ERR unknown command: {}\n", cmd).as_bytes())
+                    .await?;
             }
         }
     }
@@ -414,9 +535,9 @@ async fn handle_client(
 }
 
 async fn write_line(
-     w: &mut tokio::net::tcp::OwnedWriteHalf,
-     resp: Result<String, anyhow::Error>
- ) -> anyhow::Result<()> {
+    w: &mut tokio::net::tcp::OwnedWriteHalf,
+    resp: Result<String, anyhow::Error>,
+) -> anyhow::Result<()> {
     match resp {
         Ok(s) => {
             // We expect single-line like "OK\n" or "REDIRECT ...\n"
@@ -430,8 +551,8 @@ async fn write_line(
 }
 
 /* ============================
-   Core forwarding helpers
-   ============================ */
+Core forwarding helpers
+============================ */
 
 /// End-to-end idempotent submit with initial try + redirect + retries + backoff.
 async fn submit_idempotent(
@@ -454,7 +575,9 @@ async fn submit_idempotent(
                 match t.await? {
                     Ok(Resp::Ok(s)) => return Ok(s),
                     Ok(Resp::Redirect(to)) => {
-                        if let Ok(s) = send_once(&to, cmd_line).await { return Ok(s); }
+                        if let Ok(s) = send_once(&to, cmd_line).await {
+                            return Ok(s);
+                        }
                     }
                     Ok(Resp::NotLeader) => { /* wait for any OK from others */ }
                     Ok(Resp::Other(s)) => return Ok(s),
@@ -467,7 +590,9 @@ async fn submit_idempotent(
                 match talk_once(addr, cmd_line).await {
                     Ok(Resp::Ok(s)) => return Ok(s),
                     Ok(Resp::Redirect(to)) => {
-                        if let Ok(s) = send_once(&to, cmd_line).await { return Ok(s); }
+                        if let Ok(s) = send_once(&to, cmd_line).await {
+                            return Ok(s);
+                        }
                     }
                     Ok(Resp::NotLeader) => { /* try next */ }
                     Ok(Resp::Other(s)) => return Ok(s),
@@ -484,7 +609,9 @@ async fn submit_idempotent(
             match talk_once(addr, cmd_line).await {
                 Ok(Resp::Ok(s)) => return Ok(s),
                 Ok(Resp::Redirect(to)) => {
-                    if let Ok(s) = send_once(&to, cmd_line).await { return Ok(s); }
+                    if let Ok(s) = send_once(&to, cmd_line).await {
+                        return Ok(s);
+                    }
                 }
                 Ok(Resp::NotLeader) => {}
                 Ok(Resp::Other(s)) => return Ok(s),
@@ -545,7 +672,9 @@ enum Resp {
     Other(String),
 }
 
-async fn parse_first_line(reader: &mut BufReader<tokio::net::tcp::ReadHalf<'_>>) -> anyhow::Result<Resp> {
+async fn parse_first_line(
+    reader: &mut BufReader<tokio::net::tcp::ReadHalf<'_>>,
+) -> anyhow::Result<Resp> {
     let mut line = String::new();
     reader.read_line(&mut line).await?;
     let trimmed = line.trim_end();
@@ -652,8 +781,8 @@ async fn read_one_line(addr: SocketAddr, cmd_line: &str) -> anyhow::Result<Strin
 }
 
 /* ================
-   util
-   ================ */
+util
+================ */
 
 fn next_op_id() -> String {
     let rand4: String = rand::thread_rng()

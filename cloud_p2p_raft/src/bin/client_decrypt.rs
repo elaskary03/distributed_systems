@@ -1,9 +1,9 @@
 use clap::Parser;
-use std::{fs, path::PathBuf};
 use cloud_p2p_raft::crypto::extract_and_decrypt_from_png;
+use std::{fs, path::PathBuf};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about="Client-side stego decrypt/extract")]
+#[command(author, version, about = "Client-side stego decrypt/extract")]
 struct Args {
     /// Stego PNG to read (produced by the cluster)
     #[arg(long)]

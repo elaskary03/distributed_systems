@@ -74,10 +74,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
-    println!(
-        "P2P server for {} running at http://{}",
-        args.user, addr
-    );
+    println!("P2P server for {} running at http://{}", args.user, addr);
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -89,7 +86,9 @@ async fn list_images(
 ) -> impl IntoResponse {
     let requester = params.get("requester").cloned();
     let mut out = Vec::new();
-    let mut dir = fs::read_dir(&st.dir).await.unwrap_or_else(|_| panic!("dir missing: {:?}", st.dir));
+    let mut dir = fs::read_dir(&st.dir)
+        .await
+        .unwrap_or_else(|_| panic!("dir missing: {:?}", st.dir));
     while let Ok(Some(entry)) = dir.next_entry().await {
         if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
@@ -118,16 +117,19 @@ async fn list_images(
     Json(out)
 }
 
-async fn preview_image(
-    State(st): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
+async fn preview_image(State(st): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
     match load_image(&st, &id).await {
         Ok(img_bytes) => match image::load_from_memory(&img_bytes) {
             Ok(img) => {
                 let resized = resize_to_width(img, 200);
                 let mut buf = Vec::new();
-                if resized.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageOutputFormat::Png).is_ok() {
+                if resized
+                    .write_to(
+                        &mut std::io::Cursor::new(&mut buf),
+                        image::ImageOutputFormat::Png,
+                    )
+                    .is_ok()
+                {
                     return (StatusCode::OK, [("content-type", "image/png")], buf).into_response();
                 }
             }
@@ -246,7 +248,10 @@ fn denied_image() -> Response {
     }
     let dynimg = DynamicImage::ImageRgba8(red);
     if dynimg
-        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageOutputFormat::Png)
+        .write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageOutputFormat::Png,
+        )
         .is_ok()
     {
         return (StatusCode::FORBIDDEN, [("content-type", "image/png")], buf).into_response();

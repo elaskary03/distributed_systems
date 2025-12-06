@@ -1,21 +1,21 @@
+use bytes::Bytes;
 use clap::Parser;
+use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
+use futures::{SinkExt, StreamExt};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
-use tokio_util::codec::{LengthDelimitedCodec, FramedRead, FramedWrite};
-use bytes::Bytes;
-use futures::{StreamExt, SinkExt};
-use tracing::{debug, info, error};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
-use std::path::Path;
-use tokio::sync::Semaphore;
-use reqwest::Client;
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tracing::{debug, error, info};
 
 const MAX_LEADER_DURATION: Duration = Duration::from_secs(30);
 const LEADER_COOLDOWN: Duration = Duration::from_secs(15);
@@ -107,12 +107,21 @@ enum ClientRequest {
 #[serde(tag = "type")]
 enum ClientResponse {
     Ok,
-    NotLeader { leader_id: Option<u32> },
-    Leader { id: u32 },
-    State { role: String, term: u64, commit_index: u64 },
-    Error { message: String },
+    NotLeader {
+        leader_id: Option<u32>,
+    },
+    Leader {
+        id: u32,
+    },
+    State {
+        role: String,
+        term: u64,
+        commit_index: u64,
+    },
+    Error {
+        message: String,
+    },
 }
-
 
 #[derive(Clone)]
 struct NetNode {
@@ -147,7 +156,6 @@ struct NetNode {
     // Bounded pool for CPU-heavy crypto tasks
     crypto_workers: Arc<Semaphore>,
     http_client: Client,
-
 }
 
 impl NetNode {
@@ -158,15 +166,15 @@ impl NetNode {
         client_listen_addr: SocketAddr,
         client_public_addr: SocketAddr,
     ) -> Self {
-            let peers_arc = Arc::new(peers);
+        let peers_arc = Arc::new(peers);
         let peer_ids: Vec<u32> = peers_arc.keys().cloned().collect();
-        
+
         // Initialize next_index and match_index for all peers
         let mut next_index = HashMap::new();
         let mut match_index = HashMap::new();
         for peer_id in peer_ids {
-            next_index.insert(peer_id, 1);  // Initialize to 1 (will be updated when becoming leader)
-            match_index.insert(peer_id, 0);  // Initialize to 0 for new leaders
+            next_index.insert(peer_id, 1); // Initialize to 1 (will be updated when becoming leader)
+            match_index.insert(peer_id, 0); // Initialize to 0 for new leaders
         }
 
         Self {
@@ -203,7 +211,11 @@ impl NetNode {
 
     #[inline]
     fn clamp1(n: u64) -> u64 {
-        if n == 0 { 1 } else { n }
+        if n == 0 {
+            1
+        } else {
+            n
+        }
     }
 
     #[inline]
@@ -230,7 +242,9 @@ impl NetNode {
         let prev_log_term = if prev_log_index == 0 {
             0
         } else {
-            log.get(prev_log_index as usize - 1).map(|e| e.term).unwrap_or(0)
+            log.get(prev_log_index as usize - 1)
+                .map(|e| e.term)
+                .unwrap_or(0)
         };
         (prev_log_index, prev_log_term)
     }
@@ -246,47 +260,46 @@ impl NetNode {
     }
 
     async fn forward_to_leader(&self, cmd_line: &str) -> anyhow::Result<String> {
-    let lid = (*self.leader_hint.read().await)
-        .ok_or_else(|| anyhow::anyhow!("no leader hint"))?;
-    let addr = self.client_addr_for(lid);
+        let lid =
+            (*self.leader_hint.read().await).ok_or_else(|| anyhow::anyhow!("no leader hint"))?;
+        let addr = self.client_addr_for(lid);
 
-    let stream = TcpStream::connect(addr).await?;
-    let (r, mut w) = stream.into_split();
-    let mut reader = BufReader::new(r);
+        let stream = TcpStream::connect(addr).await?;
+        let (r, mut w) = stream.into_split();
+        let mut reader = BufReader::new(r);
 
-    // read banner (2 lines)
-    let mut tmp = String::new();
-    reader.read_line(&mut tmp).await?;
-    tmp.clear();
-    reader.read_line(&mut tmp).await?;
+        // read banner (2 lines)
+        let mut tmp = String::new();
+        reader.read_line(&mut tmp).await?;
+        tmp.clear();
+        reader.read_line(&mut tmp).await?;
 
-    // send the forwarded command
-    w.write_all(cmd_line.as_bytes()).await?;
-    w.write_all(b"\n").await?;
+        // send the forwarded command
+        w.write_all(cmd_line.as_bytes()).await?;
+        w.write_all(b"\n").await?;
 
-    // read a short burst of response lines (handles multi-line commands)
-    use tokio::time::{timeout, Duration};
-    let mut out = String::new();
+        // read a short burst of response lines (handles multi-line commands)
+        use tokio::time::{timeout, Duration};
+        let mut out = String::new();
 
-    // read first line (block up to 500ms)
-    let mut buf = String::new();
-    match timeout(Duration::from_millis(500), reader.read_line(&mut buf)).await {
-        Ok(Ok(n)) if n > 0 => out.push_str(&buf),
-        _ => return Ok(out), // nothing
-    }
-
-    // then keep grabbing lines while they arrive quickly
-    loop {
-        buf.clear();
-        match timeout(Duration::from_millis(120), reader.read_line(&mut buf)).await {
+        // read first line (block up to 500ms)
+        let mut buf = String::new();
+        match timeout(Duration::from_millis(500), reader.read_line(&mut buf)).await {
             Ok(Ok(n)) if n > 0 => out.push_str(&buf),
-            _ => break,
+            _ => return Ok(out), // nothing
         }
+
+        // then keep grabbing lines while they arrive quickly
+        loop {
+            buf.clear();
+            match timeout(Duration::from_millis(120), reader.read_line(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => out.push_str(&buf),
+                _ => break,
+            }
+        }
+
+        Ok(out)
     }
-
-    Ok(out)
-}
-
 
     async fn start(self: Arc<Self>, listen_addr: SocketAddr) -> anyhow::Result<()> {
         // Start listener with retry
@@ -297,7 +310,10 @@ impl NetNode {
                     break l;
                 }
                 Err(e) => {
-                    error!("Failed to bind to {}: {}. Retrying in 5 seconds...", listen_addr, e);
+                    error!(
+                        "Failed to bind to {}: {}. Retrying in 5 seconds...",
+                        listen_addr, e
+                    );
                     sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -315,7 +331,11 @@ impl NetNode {
                         let mut log = input_node.log.write().await;
                         let term = *input_node.current_term.read().await;
                         let index = (log.len() as u64) + 1;
-                        log.push(LogEntry { term, index, command: line.clone() });
+                        log.push(LogEntry {
+                            term,
+                            index,
+                            command: line.clone(),
+                        });
                         drop(log);
 
                         info!("Node {}: appended new entry {}", input_node.id, line);
@@ -330,7 +350,8 @@ impl NetNode {
                                 let next_indices = input_node.next_index.read().await;
                                 next_indices.get(&peer_id).copied().unwrap_or(1)
                             };
-                            let (prev_log_index, prev_log_term) = NetNode::prev_ptr(next_index, &log);
+                            let (prev_log_index, prev_log_term) =
+                                NetNode::prev_ptr(next_index, &log);
                             let start_idx = next_index.saturating_sub(1);
                             let start_usize = usize::try_from(start_idx).unwrap_or(0);
                             let entries = if start_usize > log.len() {
@@ -395,10 +416,7 @@ impl NetNode {
                     );
                     match TcpStream::connect(addr).await {
                         Ok(stream) => {
-                            info!(
-                                "Node {} connected to peer {} at {}",
-                                node.id, peer_id, addr
-                            );
+                            info!("Node {} connected to peer {} at {}", node.id, peer_id, addr);
                             backoff = Duration::from_secs(1);
                             if let Err(e) = node.handle_outbound(peer_id, stream).await {
                                 error!(
@@ -434,7 +452,10 @@ impl NetNode {
                         continue;
                     }
 
-                    info!("Node {} detected missing connection to {}, retrying...", reconnect_node.id, peer_id);
+                    info!(
+                        "Node {} detected missing connection to {}, retrying...",
+                        reconnect_node.id, peer_id
+                    );
                     let node_clone = reconnect_node.clone();
                     tokio::spawn(async move {
                         if let Ok(stream) = TcpStream::connect(addr).await {
@@ -447,7 +468,6 @@ impl NetNode {
                 }
             }
         });
-
 
         // Start election timer and raft logic loops
         let tnode = self.clone();
@@ -495,7 +515,7 @@ impl NetNode {
     }
 
     async fn handle_outbound(&self, peer_id: u32, stream: TcpStream) -> anyhow::Result<()> {
-    let (_r, w) = stream.into_split();
+        let (_r, w) = stream.into_split();
         let mut writer = FramedWrite::new(w, LengthDelimitedCodec::new());
         let (tx, mut rx) = mpsc::unbounded_channel::<RaftMessage>();
         // register sender
@@ -513,7 +533,8 @@ impl NetNode {
                 }
             }
             Ok(())
-        }.await;
+        }
+        .await;
 
         // ensure we drop the sender for this peer on any exit path
         {
@@ -536,31 +557,42 @@ impl NetNode {
 
     async fn handle_message(&self, message: RaftMessage) {
         match message {
-            RaftMessage::RequestVote { term, candidate_id, last_log_index, last_log_term } => {
-                info!("Node {} received vote request from {} for term {}", self.id, candidate_id, term);
-                
+            RaftMessage::RequestVote {
+                term,
+                candidate_id,
+                last_log_index,
+                last_log_term,
+            } => {
+                info!(
+                    "Node {} received vote request from {} for term {}",
+                    self.id, candidate_id, term
+                );
+
                 let log = self.log.read().await;
                 let our_last_index = log.len() as u64;
                 let our_last_term = log.last().map_or(0, |entry| entry.term);
-                
+
                 // Check if candidate's log is at least as up-to-date as ours
                 let log_is_ok = match our_last_term.cmp(&last_log_term) {
                     std::cmp::Ordering::Less => true,
                     std::cmp::Ordering::Equal => last_log_index >= our_last_index,
                     std::cmp::Ordering::Greater => false,
                 };
-                
+
                 if !log_is_ok {
-                    info!("Node {} rejecting vote for {} (log out of date)", self.id, candidate_id);
+                    info!(
+                        "Node {} rejecting vote for {} (log out of date)",
+                        self.id, candidate_id
+                    );
                     let reply = RaftMessage::VoteReply {
                         term: *self.current_term.read().await,
                         vote_granted: false,
-                        sender_id: self.id
+                        sender_id: self.id,
                     };
                     self.send_message(candidate_id, reply).await;
                     return;
                 }
-                
+
                 // Handle vote request
                 let mut current_term = self.current_term.write().await;
                 let mut voted_for = self.voted_for.write().await;
@@ -579,30 +611,58 @@ impl NetNode {
                         }
                         Some(id) => id == candidate_id,
                     }
-                } else { false };
+                } else {
+                    false
+                };
 
-                let reply = RaftMessage::VoteReply { term: *current_term, vote_granted: grant, sender_id: self.id };
+                let reply = RaftMessage::VoteReply {
+                    term: *current_term,
+                    vote_granted: grant,
+                    sender_id: self.id,
+                };
                 self.send_message(candidate_id, reply).await;
             }
-            RaftMessage::VoteReply { term, vote_granted, sender_id } => {
-                info!("Node {} received vote reply from {} (granted: {})", self.id, sender_id, vote_granted);
+            RaftMessage::VoteReply {
+                term,
+                vote_granted,
+                sender_id,
+            } => {
+                info!(
+                    "Node {} received vote reply from {} (granted: {})",
+                    self.id, sender_id, vote_granted
+                );
                 self.handle_vote_reply(term, vote_granted, sender_id).await;
             }
-            RaftMessage::AppendEntries { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit } => {
-                info!("Node {} received AppendEntries from {} (term {}, {} entries)", 
-                     self.id, leader_id, term, entries.len());
+            RaftMessage::AppendEntries {
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit,
+            } => {
+                info!(
+                    "Node {} received AppendEntries from {} (term {}, {} entries)",
+                    self.id,
+                    leader_id,
+                    term,
+                    entries.len()
+                );
 
                 {
                     let mut hint = self.leader_hint.write().await;
                     *hint = Some(leader_id);
                 }
-                
+
                 let current_term = *self.current_term.read().await;
                 let mut success = false;
-                
+
                 // Reply false if term < currentTerm
                 if term < current_term {
-                    info!("Node {} rejecting AppendEntries (term {} < {})", self.id, term, current_term);
+                    info!(
+                        "Node {} rejecting AppendEntries (term {} < {})",
+                        self.id, term, current_term
+                    );
                 } else {
                     // Update term if needed
                     if term > current_term {
@@ -611,15 +671,18 @@ impl NetNode {
                         *self.voted_for.write().await = None;
                         *self.leader_since.write().await = None;
                     }
-                    
+
                     // Reset heartbeat timer
                     *self.last_heartbeat.write().await = Instant::now();
-                    
+
                     let mut log = self.log.write().await;
 
                     // Reject if prev index out of range or term mismatch
                     if prev_log_index > log.len() as u64 {
-                        info!("Node {} log inconsistency (missing index {})", self.id, prev_log_index);
+                        info!(
+                            "Node {} log inconsistency (missing index {})",
+                            self.id, prev_log_index
+                        );
                     } else if prev_log_index > 0 {
                         let term_ok = log
                             .get(prev_log_index as usize - 1)
@@ -659,7 +722,7 @@ impl NetNode {
                         success = true;
                     }
                 }
-                
+
                 // Send reply
                 let reply = RaftMessage::AppendReply {
                     term: *self.current_term.read().await,
@@ -668,9 +731,16 @@ impl NetNode {
                 };
                 self.send_message(leader_id, reply).await;
             }
-            RaftMessage::AppendReply { term, sender_id, success } => {
-                info!("Node {} received AppendReply from {} (success: {})", self.id, sender_id, success);
-                
+            RaftMessage::AppendReply {
+                term,
+                sender_id,
+                success,
+            } => {
+                info!(
+                    "Node {} received AppendReply from {} (success: {})",
+                    self.id, sender_id, success
+                );
+
                 let current_term = *self.current_term.read().await;
                 if term > current_term {
                     *self.current_term.write().await = term;
@@ -679,17 +749,23 @@ impl NetNode {
                     *self.leader_since.write().await = None;
                     return;
                 }
-                
+
                 if matches!(*self.state.read().await, RaftState::Leader) {
                     if success {
                         let last_log_index = self.log.read().await.len() as u64;
                         self.update_indices(sender_id, last_log_index).await;
-                        info!("Node {} updated indices for {} to {}", self.id, sender_id, last_log_index);
+                        info!(
+                            "Node {} updated indices for {} to {}",
+                            self.id, sender_id, last_log_index
+                        );
                     } else {
                         let mut next_indices = self.next_index.write().await;
                         if let Some(next_idx) = next_indices.get_mut(&sender_id) {
                             *next_idx = Self::clamp1(next_idx.saturating_sub(1)); // clamp to ≥1
-                            info!("Node {} decreased next_index for {} to {}", self.id, sender_id, *next_idx);
+                            info!(
+                                "Node {} decreased next_index for {} to {}",
+                                self.id, sender_id, *next_idx
+                            );
                         }
                         drop(next_indices);
                         self.send_append_entries(sender_id).await;
@@ -718,131 +794,139 @@ impl NetNode {
             // count granted votes
             let granted_votes = entry.values().filter(|&&v| v).count();
             let total = std::cmp::max(1, 1 + self.connected_peer_count().await);
-            info!("Node {}: term {} has {} granted votes out of {}", self.id, term, granted_votes, total);
-        if granted_votes > total / 2 && matches!(*self.state.read().await, RaftState::Candidate) {
-            *self.state.write().await = RaftState::Leader;
-            info!("Node {} became leader for term {}", self.id, current_term);
-            *self.leader_since.write().await = Some(Instant::now());
-            *self.leader_cooldown_until.write().await = None;
-
-            self.rebuild_state_from_log().await;
-
-            // Properly initialize replication state (Raft §5.2)
-            let last_index = self.log.read().await.len() as u64;
+            info!(
+                "Node {}: term {} has {} granted votes out of {}",
+                self.id, term, granted_votes, total
+            );
+            if granted_votes > total / 2 && matches!(*self.state.read().await, RaftState::Candidate)
             {
-                let mut next_indices = self.next_index.write().await;
-                let mut match_indices = self.match_index.write().await;
+                *self.state.write().await = RaftState::Leader;
+                info!("Node {} became leader for term {}", self.id, current_term);
+                *self.leader_since.write().await = Some(Instant::now());
+                *self.leader_cooldown_until.write().await = None;
+
+                self.rebuild_state_from_log().await;
+
+                // Properly initialize replication state (Raft §5.2)
+                let last_index = self.log.read().await.len() as u64;
+                {
+                    let mut next_indices = self.next_index.write().await;
+                    let mut match_indices = self.match_index.write().await;
+                    for (&peer_id, _) in self.peers.iter() {
+                        next_indices.insert(peer_id, last_index + 1); // 1-based, points to "next to send"
+                        match_indices.insert(peer_id, 0);
+                    }
+                }
+
+                // send initial heartbeat
                 for (&peer_id, _) in self.peers.iter() {
-                    next_indices.insert(peer_id, last_index + 1); // 1-based, points to "next to send"
-                    match_indices.insert(peer_id, 0);
+                    let hb = RaftMessage::AppendEntries {
+                        term: current_term,
+                        leader_id: self.id,
+                        prev_log_index: 0,
+                        prev_log_term: 0,
+                        entries: vec![],
+                        leader_commit: 0,
+                    };
+                    self.send_message(peer_id, hb).await;
                 }
             }
-
-            // send initial heartbeat
-            for (&peer_id, _) in self.peers.iter() {
-                let hb = RaftMessage::AppendEntries {
-                    term: current_term,
-                    leader_id: self.id,
-                    prev_log_index: 0,
-                    prev_log_term: 0,
-                    entries: vec![],
-                    leader_commit: 0
-                };
-                self.send_message(peer_id, hb).await;
-            }
-        }
         }
     }
 
     async fn election_loop(&self) {
         loop {
-        // 2–4s timeout
-        let timeout = Duration::from_millis(2000 + rand::random::<u64>() % 2000);
+            // 2–4s timeout
+            let timeout = Duration::from_millis(2000 + rand::random::<u64>() % 2000);
 
-        match *self.state.read().await {
-            RaftState::Leader => {
-                sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-            RaftState::Candidate | RaftState::Follower => {
-                if let Some(until) = *self.leader_cooldown_until.read().await {
-                    if Instant::now() < until {
-                        sleep(Duration::from_millis(200)).await;
-                        continue;
-                    }
-                }
-                let last = *self.last_heartbeat.read().await;
-                if last.elapsed() < timeout {
-                    sleep(Duration::from_millis(100)).await;
+            match *self.state.read().await {
+                RaftState::Leader => {
+                    sleep(Duration::from_millis(500)).await;
                     continue;
                 }
-                info!(
-                    "Node {} election timeout after {:?}, starting election",
-                    self.id, last.elapsed()
-                );
-            }
-        }
-
-        if self.failure_simulated().await {
-            continue;
-        }
-
-        *self.state.write().await = RaftState::Candidate;
-        *self.current_term.write().await += 1;
-        *self.voted_for.write().await = Some(self.id);
-        *self.leader_since.write().await = None;
-        *self.last_heartbeat.write().await = Instant::now();
-        let term = *self.current_term.read().await;
-        info!("Node {} starting election for term {}", self.id, term);
-
-        // reset & self vote
-        {
-            let mut votes = self.votes_received.write().await;
-            votes.insert(term, HashMap::new());
-            votes.get_mut(&term).unwrap().insert(self.id, true);
-        }
-
-        let (last_log_index, last_log_term) = {
-            let lg = self.log.read().await;
-            let idx = lg.len() as u64;
-            let term_of_last = lg.last().map_or(0, |e| e.term);
-            (idx, term_of_last)
-        };
-
-        let req = RaftMessage::RequestVote {
-            term,
-            candidate_id: self.id,
-            last_log_index,
-            last_log_term,
-        };
-
-        // If we're isolated (no connected peers), self-elect so we keep making progress
-        if self.connected_peer_count().await == 0 {
-            *self.state.write().await = RaftState::Leader;
-            *self.leader_since.write().await = Some(Instant::now());
-            *self.leader_cooldown_until.write().await = None;
-            info!("Node {} self-electing as leader (no connected peers)", self.id);
-            self.rebuild_state_from_log().await;
-
-            let last_index = self.log.read().await.len() as u64;
-            {
-                let mut next_indices = self.next_index.write().await;
-                let mut match_indices = self.match_index.write().await;
-                for (&peer_id, _) in self.peers.iter() {
-                    next_indices.insert(peer_id, last_index + 1);
-                    match_indices.insert(peer_id, 0);
+                RaftState::Candidate | RaftState::Follower => {
+                    if let Some(until) = *self.leader_cooldown_until.read().await {
+                        if Instant::now() < until {
+                            sleep(Duration::from_millis(200)).await;
+                            continue;
+                        }
+                    }
+                    let last = *self.last_heartbeat.read().await;
+                    if last.elapsed() < timeout {
+                        sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    info!(
+                        "Node {} election timeout after {:?}, starting election",
+                        self.id,
+                        last.elapsed()
+                    );
                 }
             }
-            // no peers to heartbeat, but advance commit for solo progress
-            self.maybe_force_single_node_commit().await;
-            continue;
-        }
 
-        for (&peer_id, _) in self.peers.iter() {
-            self.send_message(peer_id, req.clone()).await;
+            if self.failure_simulated().await {
+                continue;
+            }
+
+            *self.state.write().await = RaftState::Candidate;
+            *self.current_term.write().await += 1;
+            *self.voted_for.write().await = Some(self.id);
+            *self.leader_since.write().await = None;
+            *self.last_heartbeat.write().await = Instant::now();
+            let term = *self.current_term.read().await;
+            info!("Node {} starting election for term {}", self.id, term);
+
+            // reset & self vote
+            {
+                let mut votes = self.votes_received.write().await;
+                votes.insert(term, HashMap::new());
+                votes.get_mut(&term).unwrap().insert(self.id, true);
+            }
+
+            let (last_log_index, last_log_term) = {
+                let lg = self.log.read().await;
+                let idx = lg.len() as u64;
+                let term_of_last = lg.last().map_or(0, |e| e.term);
+                (idx, term_of_last)
+            };
+
+            let req = RaftMessage::RequestVote {
+                term,
+                candidate_id: self.id,
+                last_log_index,
+                last_log_term,
+            };
+
+            // If we're isolated (no connected peers), self-elect so we keep making progress
+            if self.connected_peer_count().await == 0 {
+                *self.state.write().await = RaftState::Leader;
+                *self.leader_since.write().await = Some(Instant::now());
+                *self.leader_cooldown_until.write().await = None;
+                info!(
+                    "Node {} self-electing as leader (no connected peers)",
+                    self.id
+                );
+                self.rebuild_state_from_log().await;
+
+                let last_index = self.log.read().await.len() as u64;
+                {
+                    let mut next_indices = self.next_index.write().await;
+                    let mut match_indices = self.match_index.write().await;
+                    for (&peer_id, _) in self.peers.iter() {
+                        next_indices.insert(peer_id, last_index + 1);
+                        match_indices.insert(peer_id, 0);
+                    }
+                }
+                // no peers to heartbeat, but advance commit for solo progress
+                self.maybe_force_single_node_commit().await;
+                continue;
+            }
+
+            for (&peer_id, _) in self.peers.iter() {
+                self.send_message(peer_id, req.clone()).await;
+            }
         }
     }
-}
 
     async fn failure_simulated(&self) -> bool {
         false
@@ -855,7 +939,10 @@ impl NetNode {
         let log = self.log.read().await;
         let commit_index = *self.commit_index.read().await;
 
-        info!("Node {} rebuilding state from {} committed entries", self.id, commit_index);
+        info!(
+            "Node {} rebuilding state from {} committed entries",
+            self.id, commit_index
+        );
 
         self.registered_users.write().await.clear();
         self.image_metadata.write().await.clear();
@@ -871,13 +958,16 @@ impl NetNode {
                         if let (Some(user), Some(ip)) = (user, ip) {
                             let p2p_port: u16 = port.unwrap_or("10000").parse().unwrap_or(10000);
                             let mut map = self.registered_users.write().await;
-                            map.insert(user.to_string(), UserEntry {
-                                username: user.to_string(),
-                                ip: ip.to_string(),
-                                p2p_port,
-                                online: true,
-                                last_seen: Self::now_nanos(),
-                            });
+                            map.insert(
+                                user.to_string(),
+                                UserEntry {
+                                    username: user.to_string(),
+                                    ip: ip.to_string(),
+                                    p2p_port,
+                                    online: true,
+                                    last_seen: Self::now_nanos(),
+                                },
+                            );
                         }
                     }
                     Some("UNREGISTER") => {
@@ -915,8 +1005,11 @@ impl NetNode {
             }
         }
 
-        info!("Node {} rebuild complete: {} users restored",
-            self.id, self.registered_users.read().await.len());
+        info!(
+            "Node {} rebuild complete: {} users restored",
+            self.id,
+            self.registered_users.read().await.len()
+        );
 
         // Reattach cached metadata for users that still exist so offline owners keep their images visible
         {
@@ -930,7 +1023,7 @@ impl NetNode {
         }
     }
 
-        // Apply committed log entries to state machine
+    // Apply committed log entries to state machine
     async fn apply_committed_entries(&self) {
         let commit_index = *self.commit_index.read().await;
         let mut last_applied = self.last_applied.write().await;
@@ -940,22 +1033,29 @@ impl NetNode {
             for i in (*last_applied + 1)..=commit_index {
                 if let Some(entry) = log.get(i as usize - 1) {
                     if !matches!(*self.state.read().await, RaftState::Leader) {
-                        info!("Node {} (follower) skipping execution of {}", self.id, entry.command);
+                        info!(
+                            "Node {} (follower) skipping execution of {}",
+                            self.id, entry.command
+                        );
                         continue;
                     }
                     let mut parts = entry.command.split_whitespace();
                     match parts.next() {
                         Some("REGISTER") => {
                             if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
-                                let port: u16 = parts.next().unwrap_or("10000").parse().unwrap_or(10000);
+                                let port: u16 =
+                                    parts.next().unwrap_or("10000").parse().unwrap_or(10000);
                                 let mut map = self.registered_users.write().await;
-                                map.insert(user.to_string(), UserEntry {
-                                    username: user.to_string(),
-                                    ip: ip.to_string(),
-                                    p2p_port: port,
-                                    online: true,
-                                    last_seen: Self::now_nanos(),
-                                });
+                                map.insert(
+                                    user.to_string(),
+                                    UserEntry {
+                                        username: user.to_string(),
+                                        ip: ip.to_string(),
+                                        p2p_port: port,
+                                        online: true,
+                                        last_seen: Self::now_nanos(),
+                                    },
+                                );
                                 info!("Node {}: Applied REGISTER {} {}", self.id, user, ip);
                                 let node = self.clone();
                                 let user_s = user.to_string();
@@ -964,7 +1064,10 @@ impl NetNode {
                                     node.sync_user_metadata(&user_s, &ip_s, port).await;
                                 });
                             } else {
-                                info!("Node {}: Malformed REGISTER command '{}'", self.id, entry.command);
+                                info!(
+                                    "Node {}: Malformed REGISTER command '{}'",
+                                    self.id, entry.command
+                                );
                             }
                         }
                         Some("UNREGISTER") => {
@@ -993,36 +1096,84 @@ impl NetNode {
                                 }
                                 info!("Node {}: Applied UNREGISTER {}", self.id, user);
                             } else {
-                                info!("Node {}: Malformed UNREGISTER command '{}'", self.id, entry.command);
+                                info!(
+                                    "Node {}: Malformed UNREGISTER command '{}'",
+                                    self.id, entry.command
+                                );
                             }
                         }
                         Some("ENCRYPT_IMAGE") => {
                             // ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
-                            if let (Some(_id), Some(passphrase), Some(input_path), Some(output_path)) =
-                                (parts.next(), parts.next(), parts.next(), parts.next())
+                            if let (
+                                Some(id),
+                                Some(passphrase),
+                                Some(input_path),
+                                Some(output_path),
+                            ) = (parts.next(), parts.next(), parts.next(), parts.next())
                             {
+                                let image_id = id.to_string();
                                 let input_path = input_path.to_string();
                                 let output_path = output_path.to_string();
                                 let passphrase = passphrase.to_string();
                                 let cover_path = "images/cover_image.PNG".to_string();
                                 let workers = self.crypto_workers.clone();
                                 let node_id = self.id;
+                                let http_client = self.http_client.clone();
 
                                 tokio::spawn(async move {
                                     let _permit = workers.acquire_owned().await;
 
-                                    let plaintext_bytes = match tokio::fs::read(&input_path).await {
-                                        Ok(b) => b,
-                                        Err(e) => {
-                                            error!("Node {}: failed to read {}: {:?}", node_id, input_path, e);
-                                            return;
+                                    let plaintext_bytes = if is_http_url(&input_path) {
+                                        match http_client
+                                            .get(&input_path)
+                                            .timeout(Duration::from_secs(12))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(resp) => match resp.error_for_status() {
+                                                Ok(r) => match r.bytes().await {
+                                                    Ok(b) => b.to_vec(),
+                                                    Err(e) => {
+                                                        error!("Node {}: failed to read HTTP body {}: {:?}", node_id, input_path, e);
+                                                        return;
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    error!(
+                                                        "Node {}: HTTP fetch failed {}: {:?}",
+                                                        node_id, input_path, e
+                                                    );
+                                                    return;
+                                                }
+                                            },
+                                            Err(e) => {
+                                                error!(
+                                                    "Node {}: HTTP request failed {}: {:?}",
+                                                    node_id, input_path, e
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    } else {
+                                        match tokio::fs::read(&input_path).await {
+                                            Ok(b) => b,
+                                            Err(e) => {
+                                                error!(
+                                                    "Node {}: failed to read {}: {:?}",
+                                                    node_id, input_path, e
+                                                );
+                                                return;
+                                            }
                                         }
                                     };
 
                                     let cover_bytes = match tokio::fs::read(&cover_path).await {
                                         Ok(b) => b,
                                         Err(e) => {
-                                            error!("Node {}: failed to read cover image {}: {:?}", node_id, cover_path, e);
+                                            error!(
+                                                "Node {}: failed to read cover image {}: {:?}",
+                                                node_id, cover_path, e
+                                            );
                                             return;
                                         }
                                     };
@@ -1039,24 +1190,69 @@ impl NetNode {
                                     let (stego_bytes, sha, count) = match crypto {
                                         Ok(Ok(t)) => t,
                                         Ok(Err(e)) => {
-                                            error!("Node {}: encryption/embed failed: {:?}", node_id, e);
+                                            error!(
+                                                "Node {}: encryption/embed failed: {:?}",
+                                                node_id, e
+                                            );
                                             return;
                                         }
                                         Err(e) => {
-                                            error!("Node {}: encryption task join failed: {:?}", node_id, e);
+                                            error!(
+                                                "Node {}: encryption task join failed: {:?}",
+                                                node_id, e
+                                            );
                                             return;
                                         }
                                     };
 
+                                    if is_http_url(&output_path) {
+                                        match http_client
+                                            .post(&output_path)
+                                            .header("content-type", "image/png")
+                                            .header("x-image-id", &image_id)
+                                            .body(stego_bytes.clone())
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(resp) if resp.status().is_success() => {
+                                                info!(
+                                                    "Node {}: ENCRYPT_IMAGE uploaded via HTTP for {} ({} bytes embedded, sha256={})",
+                                                    node_id, image_id, count, sha
+                                                );
+                                            }
+                                            Ok(resp) => {
+                                                error!(
+                                                    "Node {}: HTTP upload failed {} status={} for {}",
+                                                    node_id, output_path, resp.status(), image_id
+                                                );
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "Node {}: HTTP upload error {} for {}: {:?}",
+                                                    node_id, output_path, image_id, e
+                                                );
+                                            }
+                                        }
+                                        return;
+                                    }
+
                                     if let Some(parent) = Path::new(&output_path).parent() {
                                         if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                                            error!("Node {}: create_dir_all {:?} failed: {:?}", node_id, parent, e);
+                                            error!(
+                                                "Node {}: create_dir_all {:?} failed: {:?}",
+                                                node_id, parent, e
+                                            );
                                             return;
                                         }
                                     }
 
-                                    if let Err(e) = tokio::fs::write(&output_path, &stego_bytes).await {
-                                        error!("Node {}: failed to save stego image {}: {:?}", node_id, output_path, e);
+                                    if let Err(e) =
+                                        tokio::fs::write(&output_path, &stego_bytes).await
+                                    {
+                                        error!(
+                                            "Node {}: failed to save stego image {}: {:?}",
+                                            node_id, output_path, e
+                                        );
                                     } else {
                                         info!(
                                             "Node {}: ENCRYPT_IMAGE done '{}' → '{}' ({} bytes embedded, sha256={})",
@@ -1065,7 +1261,10 @@ impl NetNode {
                                     }
                                 });
                             } else {
-                                error!("Node {}: malformed ENCRYPT_IMAGE command '{}'", self.id, entry.command);
+                                error!(
+                                    "Node {}: malformed ENCRYPT_IMAGE command '{}'",
+                                    self.id, entry.command
+                                );
                             }
                         }
                         Some("SET_P2P_PORT") => {
@@ -1081,9 +1280,15 @@ impl NetNode {
                                 });
                                 entry.p2p_port = p2p_port;
                                 entry.last_seen = Self::now_nanos();
-                                info!("Node {}: Applied SET_P2P_PORT {} {}", self.id, user, p2p_port);
+                                info!(
+                                    "Node {}: Applied SET_P2P_PORT {} {}",
+                                    self.id, user, p2p_port
+                                );
                             } else {
-                                info!("Node {}: Malformed SET_P2P_PORT command '{}'", self.id, entry.command);
+                                info!(
+                                    "Node {}: Malformed SET_P2P_PORT command '{}'",
+                                    self.id, entry.command
+                                );
                             }
                         }
                         Some(other) => {
@@ -1115,7 +1320,9 @@ impl NetNode {
         let prev_log_term = if prev_log_index == 0 {
             0
         } else {
-            log.get(prev_log_index as usize - 1).map(|e| e.term).unwrap_or(0)
+            log.get(prev_log_index as usize - 1)
+                .map(|e| e.term)
+                .unwrap_or(0)
         };
 
         let start_idx = next_index.saturating_sub(1);
@@ -1141,23 +1348,23 @@ impl NetNode {
         loop {
             // Heartbeat interval should be significantly less than election timeout but not too aggressive
             sleep(Duration::from_millis(500)).await;
-            
+
             // Only leaders send heartbeats
             if !matches!(*self.state.read().await, RaftState::Leader) {
                 continue;
             }
-            
+
             // Apply any newly committed entries
             self.apply_committed_entries().await;
             // If isolated, still advance our own log
             self.maybe_force_single_node_commit().await;
-            
+
             for (&peer_id, _) in self.peers.iter() {
                 self.send_append_entries(peer_id).await;
             }
         }
     }
-    
+
     async fn leader_rotation_loop(&self) {
         let mut ticker = tokio::time::interval(Duration::from_millis(500));
         loop {
@@ -1184,7 +1391,7 @@ impl NetNode {
             }
         }
     }
-    
+
     async fn force_step_down(&self) {
         *self.state.write().await = RaftState::Follower;
         *self.voted_for.write().await = None;
@@ -1197,8 +1404,7 @@ impl NetNode {
             *hb = Instant::now();
         }
     }
-    
-    
+
     async fn update_indices(&self, peer_id: u32, acked_index: u64) {
         // 1️⃣ Update follower’s replication state
         {
@@ -1238,7 +1444,10 @@ impl NetNode {
                 let mut commit_index = self.commit_index.write().await;
                 if majority_idx > *commit_index {
                     *commit_index = majority_idx;
-                    println!("🟢 Node {} advanced commit_index to {}", self.id, majority_idx);
+                    println!(
+                        "🟢 Node {} advanced commit_index to {}",
+                        self.id, majority_idx
+                    );
                 }
             }
         }
@@ -1252,7 +1461,10 @@ impl NetNode {
 
         loop {
             let (stream, peer_addr) = listener.accept().await?;
-            info!("📡 Node {} accepted client connection from {}", self.id, peer_addr);
+            info!(
+                "📡 Node {} accepted client connection from {}",
+                self.id, peer_addr
+            );
             let node = self.clone();
             tokio::spawn(async move {
                 if let Err(e) = node.handle_client_connection(stream).await {
@@ -1283,10 +1495,12 @@ impl NetNode {
             match parts.next() {
                 Some("LEADER") => {
                     if is_leader {
-                        w.write_all(format!("LEADER {}\n", self.id).as_bytes()).await?;
+                        w.write_all(format!("LEADER {}\n", self.id).as_bytes())
+                            .await?;
                     } else if let Some(lid) = *self.leader_hint.read().await {
                         let addr = self.client_addr_for(lid);
-                        w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                        w.write_all(format!("REDIRECT {}\n", addr).as_bytes())
+                            .await?;
                     } else {
                         w.write_all(b"NOT_LEADER\n").await?;
                     }
@@ -1302,7 +1516,8 @@ impl NetNode {
                                 // fallback to hint if we can
                                 if let Some(lid) = *self.leader_hint.read().await {
                                     let addr = self.client_addr_for(lid);
-                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes())
+                                        .await?;
                                 } else {
                                     w.write_all(b"NOT_LEADER\n").await?;
                                 }
@@ -1313,14 +1528,16 @@ impl NetNode {
                     let user = match parts.next() {
                         Some(s) => s.to_string(),
                         None => {
-                            w.write_all(b"Usage: REGISTER <user> <ip> [p2p_port]\n").await?;
+                            w.write_all(b"Usage: REGISTER <user> <ip> [p2p_port]\n")
+                                .await?;
                             continue;
                         }
                     };
                     let ip = match parts.next() {
                         Some(s) => s.to_string(),
                         None => {
-                            w.write_all(b"Usage: REGISTER <user> <ip> [p2p_port]\n").await?;
+                            w.write_all(b"Usage: REGISTER <user> <ip> [p2p_port]\n")
+                                .await?;
                             continue;
                         }
                     };
@@ -1339,7 +1556,8 @@ impl NetNode {
                             Err(_) => {
                                 if let Some(lid) = *self.leader_hint.read().await {
                                     let addr = self.client_addr_for(lid);
-                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes())
+                                        .await?;
                                 } else {
                                     w.write_all(b"NOT_LEADER\n").await?;
                                 }
@@ -1376,7 +1594,8 @@ impl NetNode {
                                 // fallback to hint if we can
                                 if let Some(lid) = *self.leader_hint.read().await {
                                     let addr = self.client_addr_for(lid);
-                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes())
+                                        .await?;
                                 } else {
                                     w.write_all(b"NOT_LEADER\n").await?;
                                 }
@@ -1407,7 +1626,7 @@ impl NetNode {
                         }
                     }
                 }
-                
+
                 Some("SHOW_USERS") | Some("LIST_USERS") => {
                     if !is_leader {
                         // forward to the leader so you always see the leader’s authoritative state
@@ -1418,7 +1637,8 @@ impl NetNode {
                             Err(_) => {
                                 if let Some(lid) = *self.leader_hint.read().await {
                                     let addr = self.client_addr_for(lid);
-                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes())
+                                        .await?;
                                 } else {
                                     w.write_all(b"NOT_LEADER\n").await?;
                                 }
@@ -1441,8 +1661,10 @@ impl NetNode {
                                     entry.p2p_port,
                                     entry.online,
                                     entry.last_seen
-                                ).as_bytes()
-                            ).await?;
+                                )
+                                .as_bytes(),
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -1455,7 +1677,8 @@ impl NetNode {
                             Err(_) => {
                                 if let Some(lid) = *self.leader_hint.read().await {
                                     let addr = self.client_addr_for(lid);
-                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes())
+                                        .await?;
                                 } else {
                                     w.write_all(b"NOT_LEADER\n").await?;
                                 }
@@ -1498,7 +1721,8 @@ impl NetNode {
                             Err(_) => {
                                 if let Some(lid) = *self.leader_hint.read().await {
                                     let addr = self.client_addr_for(lid);
-                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                                    w.write_all(format!("REDIRECT {}\n", addr).as_bytes())
+                                        .await?;
                                 } else {
                                     w.write_all(b"NOT_LEADER\n").await?;
                                 }
@@ -1511,7 +1735,10 @@ impl NetNode {
                     let mut out = String::new();
                     for (_, entry) in users.iter() {
                         if entry.online && !entry.ip.is_empty() {
-                            out.push_str(&format!("{} {} {}\n", entry.username, entry.ip, entry.p2p_port));
+                            out.push_str(&format!(
+                                "{} {} {}\n",
+                                entry.username, entry.ip, entry.p2p_port
+                            ));
                         }
                     }
                     if out.is_empty() {
@@ -1521,80 +1748,92 @@ impl NetNode {
                     }
                 }
                 Some("SUBMIT") => {
-                // Usage: SUBMIT <op_id> <command...>
-                let op_id = match parts.next() {
-                    Some(s) => s.to_string(),
-                    None => {
+                    // Usage: SUBMIT <op_id> <command...>
+                    let op_id = match parts.next() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?;
+                            continue;
+                        }
+                    };
+                    let rest = parts.collect::<Vec<_>>().join(" ");
+                    if rest.is_empty() {
                         w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?;
                         continue;
                     }
-                };
-                let rest = parts.collect::<Vec<_>>().join(" ");
-                if rest.is_empty() {
-                    w.write_all(b"Usage: SUBMIT <op_id> <command...>\n").await?;
-                    continue;
-                }
 
-                // Idempotency: if we've seen this op_id, acknowledge
-                {
-                    let seen = self.processed_ops.read().await;
-                    if seen.contains(&op_id) {
-                        w.write_all(b"OK\n").await?;
-                        continue;
+                    // Idempotency: if we've seen this op_id, acknowledge
+                    {
+                        let seen = self.processed_ops.read().await;
+                        if seen.contains(&op_id) {
+                            w.write_all(b"OK\n").await?;
+                            continue;
+                        }
                     }
-                }
 
-                let is_leader = matches!(*self.state.read().await, RaftState::Leader);
+                    let is_leader = matches!(*self.state.read().await, RaftState::Leader);
                     if !is_leader {
                         if let Some(lid) = *self.leader_hint.read().await {
                             let addr = self.client_addr_for(lid);
-                            w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
+                            w.write_all(format!("REDIRECT {}\n", addr).as_bytes())
+                                .await?;
                         } else {
                             w.write_all(b"NOT_LEADER\n").await?;
                         }
                         continue;
-                }
-
-                // Leader path: mark op_id seen, then append+replicate the payload
-                {
-                    let mut seen = self.processed_ops.write().await;
-                    seen.insert(op_id);
-                }
-                self.append_and_replicate(rest).await;
-                w.write_all(b"OK\n").await?;
-            }
-
-            Some("ENCRYPT_IMAGE") => {
-                if !is_leader {
-                    if let Some(lid) = *self.leader_hint.read().await {
-                        let addr = self.client_addr_for(lid);
-                        w.write_all(format!("REDIRECT {}\n", addr).as_bytes()).await?;
-                    } else {
-                        w.write_all(b"NOT_LEADER\n").await?;
                     }
-                    continue;
+
+                    // Leader path: mark op_id seen, then append+replicate the payload
+                    {
+                        let mut seen = self.processed_ops.write().await;
+                        seen.insert(op_id);
+                    }
+                    self.append_and_replicate(rest).await;
+                    w.write_all(b"OK\n").await?;
                 }
 
-                // Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
-                let id = parts.next().unwrap_or_default().to_string();
-                let passphrase = parts.next().unwrap_or_default().to_string();
-                let input_path = parts.next().unwrap_or_default().to_string();
-                let output_path = parts.next().unwrap_or_default().to_string();
+                Some("ENCRYPT_IMAGE") => {
+                    if !is_leader {
+                        if let Some(lid) = *self.leader_hint.read().await {
+                            let addr = self.client_addr_for(lid);
+                            w.write_all(format!("REDIRECT {}\n", addr).as_bytes())
+                                .await?;
+                        } else {
+                            w.write_all(b"NOT_LEADER\n").await?;
+                        }
+                        continue;
+                    }
 
-                if id.is_empty() || passphrase.is_empty() || input_path.is_empty() || output_path.is_empty() {
-                    w.write_all(b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n").await?;
-                    continue;
+                    // Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>
+                    let id = parts.next().unwrap_or_default().to_string();
+                    let passphrase = parts.next().unwrap_or_default().to_string();
+                    let input_path = parts.next().unwrap_or_default().to_string();
+                    let output_path = parts.next().unwrap_or_default().to_string();
+
+                    if id.is_empty()
+                        || passphrase.is_empty()
+                        || input_path.is_empty()
+                        || output_path.is_empty()
+                    {
+                        w.write_all(
+                            b"Usage: ENCRYPT_IMAGE <id> <passphrase> <input_path> <output_path>\n",
+                        )
+                        .await?;
+                        continue;
+                    }
+
+                    let command = format!(
+                        "ENCRYPT_IMAGE {} {} {} {}",
+                        id, passphrase, input_path, output_path
+                    );
+                    self.append_and_replicate(command).await;
+                    w.write_all(b"OK\n").await?;
                 }
 
-                let command = format!("ENCRYPT_IMAGE {} {} {} {}", id, passphrase, input_path, output_path);
-                self.append_and_replicate(command).await;
-                w.write_all(b"OK\n").await?;
-            }
-
-            Some(unknown) => {
-                let s = format!("ERR unknown command: {}\n", unknown);
-                w.write_all(s.as_bytes()).await?;
-            }
+                Some(unknown) => {
+                    let s = format!("ERR unknown command: {}\n", unknown);
+                    w.write_all(s.as_bytes()).await?;
+                }
 
                 None => {}
             }
@@ -1613,10 +1852,17 @@ impl NetNode {
         let index = {
             let mut log = self.log.write().await;
             let index = (log.len() as u64) + 1;
-            log.push(LogEntry { term, index, command: command.clone() });
+            log.push(LogEntry {
+                term,
+                index,
+                command: command.clone(),
+            });
             index
         };
-        info!("Node {}: appended new entry #{} '{}'", self.id, index, command);
+        info!(
+            "Node {}: appended new entry #{} '{}'",
+            self.id, index, command
+        );
 
         // If we're effectively alone (no connected peers), commit immediately so we can make progress
         self.maybe_force_single_node_commit().await;
@@ -1648,16 +1894,9 @@ impl NetNode {
             return;
         }
         let cached = self.image_metadata.read().await.get(user).cloned();
-        let url = format!(
-            "http://{}:{}/list-images?requester={}",
-            ip, p2p_port, user
-        );
+        let url = format!("http://{}:{}/list-images?requester={}", ip, p2p_port, user);
         let client = self.http_client.clone();
-        let resp = client
-            .get(url)
-            .timeout(Duration::from_secs(4))
-            .send()
-            .await;
+        let resp = client.get(url).timeout(Duration::from_secs(4)).send().await;
 
         // Helper to keep the last-known images even if the node is offline
         let offline_with_cache = |prev: Option<&Value>| {
@@ -1695,7 +1934,10 @@ impl NetNode {
                 }
             },
             Err(e) => {
-                error!("Node {} failed to sync metadata for {}: {}", self.id, user, e);
+                error!(
+                    "Node {} failed to sync metadata for {}: {}",
+                    self.id, user, e
+                );
                 let cached_obj = offline_with_cache(cached.as_ref());
                 self.image_metadata
                     .write()
@@ -1706,13 +1948,19 @@ impl NetNode {
     }
 }
 
+fn is_http_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
     let mut peers_map = HashMap::new();
     for pair in args.peers.split(',') {
-        if pair.trim().is_empty() { continue; }
+        if pair.trim().is_empty() {
+            continue;
+        }
         if let Some((id_s, addr)) = pair.split_once('=') {
             let id: u32 = id_s.parse()?;
             let sa: SocketAddr = addr.parse()?;
@@ -1737,5 +1985,7 @@ async fn main() -> anyhow::Result<()> {
     ));
     node.clone().start(listen).await?;
     // keep alive
-    loop { sleep(Duration::from_secs(3600)).await; }
+    loop {
+        sleep(Duration::from_secs(3600)).await;
+    }
 }

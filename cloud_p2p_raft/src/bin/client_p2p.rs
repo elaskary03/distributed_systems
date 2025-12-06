@@ -6,13 +6,19 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use image::{imageops::FilterType, DynamicImage, ImageOutputFormat, GenericImageView};
+use cloud_p2p_raft::crypto::{embed_lsb_rgba, extract_n_bytes};
+use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageOutputFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::HashMap, env, net::SocketAddr, path::{Path, PathBuf}, time::SystemTime};
+use std::{
+    collections::HashMap,
+    env,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 use tokio::fs;
 use tower_http::cors::{Any, CorsLayer};
-use cloud_p2p_raft::crypto::{embed_lsb_rgba, extract_n_bytes};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Client P2P stub server")]
@@ -105,8 +111,11 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
     println!("P2P stub listening on {} for owner {}", addr, args.user);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -155,9 +164,7 @@ async fn upload_image(
 
     // Prefer the provided preview/original bytes for "original" storage and previews;
     // fall back to the uploaded file if none were provided.
-    let original_bytes = preview_bytes
-        .clone()
-        .unwrap_or_else(|| stego_bytes.clone());
+    let original_bytes = preview_bytes.clone().unwrap_or_else(|| stego_bytes.clone());
 
     let owner_paths = match ensure_owner_paths(&st.base, &owner).await {
         Ok(p) => p,
@@ -169,8 +176,8 @@ async fn upload_image(
                 .into_response();
         }
     };
-    let base_perms: Option<HashMap<String, i64>> = permissions_raw
-        .and_then(|s| serde_json::from_str(&s).ok());
+    let base_perms: Option<HashMap<String, i64>> =
+        permissions_raw.and_then(|s| serde_json::from_str(&s).ok());
     let mut meta = default_metadata(&owner, base_perms.clone());
     if let Some(p) = base_perms {
         meta.permissions = p;
@@ -213,10 +220,7 @@ async fn list_images(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl axum::response::IntoResponse {
     let requester = params.get("requester").cloned();
-    let is_owner = requester
-        .as_ref()
-        .map(|r| r == &st.owner)
-        .unwrap_or(false);
+    let is_owner = requester.as_ref().map(|r| r == &st.owner).unwrap_or(false);
     let mut images = Vec::new();
     // Only list images belonging to this server's owner to avoid leaking other users' data
     let owner_dir = st.base.join(&st.owner);
@@ -283,15 +287,12 @@ async fn preview_image(
 
     // 2) otherwise, create preview from ORIGINAL ONLY
     match load_image(&paths.original, &image_id).await {
-        Ok(orig) => {
-            match make_preview_bytes(&orig) {
-                Ok(resized) => {
-                    return (StatusCode::OK, [("content-type", "image/png")], resized)
-                        .into_response();
-                }
-                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(orig) => match make_preview_bytes(&orig) {
+            Ok(resized) => {
+                return (StatusCode::OK, [("content-type", "image/png")], resized).into_response();
             }
-        }
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        },
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -357,7 +358,11 @@ async fn request_image(
     Json(body): Json<RequestImage>,
 ) -> impl axum::response::IntoResponse {
     if body.requester.trim().is_empty() || body.views <= 0 {
-        return (StatusCode::BAD_REQUEST, "requester and positive views required").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "requester and positive views required",
+        )
+            .into_response();
     }
     let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
     if load_image(&paths.encrypted, &image_id).await.is_err() {
@@ -376,10 +381,7 @@ async fn request_image(
     let mut pending = load_pending_requests(&paths.meta, &image_id)
         .await
         .unwrap_or_default();
-    if pending
-        .iter()
-        .any(|r| r.viewer == body.requester)
-    {
+    if pending.iter().any(|r| r.viewer == body.requester) {
         return Json(json!({"status":"pending"})).into_response();
     }
     pending.push(PendingRequest {
@@ -387,7 +389,11 @@ async fn request_image(
         requested_views: body.views,
     });
     if let Err(e) = save_pending_requests(&paths.meta, &image_id, &pending).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("save pending: {e}")).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("save pending: {e}"),
+        )
+            .into_response();
     }
 
     Json(json!({"status":"queued","viewer": body.requester})).into_response()
@@ -431,7 +437,11 @@ async fn approve_request(
     Json(body): Json<RequestImage>,
 ) -> impl axum::response::IntoResponse {
     if body.requester.trim().is_empty() || body.views <= 0 {
-        return (StatusCode::BAD_REQUEST, "viewer and approved_views required").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "viewer and approved_views required",
+        )
+            .into_response();
     }
     let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
     if load_image(&paths.encrypted, &image_id).await.is_err() {
@@ -457,7 +467,8 @@ async fn approve_request(
     ensure_owner_default_perm(&mut meta);
     if let Some(pw) = body.passphrase.as_ref() {
         if !pw.trim().is_empty() {
-            meta.shared_passphrases.insert(body.requester.clone(), pw.trim().to_string());
+            meta.shared_passphrases
+                .insert(body.requester.clone(), pw.trim().to_string());
         }
     }
 
@@ -527,11 +538,13 @@ async fn resolve_owner_paths(base: &PathBuf, owner: &str, image_id: &str) -> Own
     if let Some(p) = find_owner_paths(base, image_id).await {
         return p;
     }
-    ensure_owner_paths(base, owner).await.unwrap_or_else(|_| OwnerPaths {
-        original: base.join(owner).join("original"),
-        encrypted: base.join(owner).join("encrypted"),
-        meta: base.join(owner).join("meta"),
-    })
+    ensure_owner_paths(base, owner)
+        .await
+        .unwrap_or_else(|_| OwnerPaths {
+            original: base.join(owner).join("original"),
+            encrypted: base.join(owner).join("encrypted"),
+            meta: base.join(owner).join("meta"),
+        })
 }
 
 // helpers
@@ -587,7 +600,11 @@ async fn save_image(root: &PathBuf, id: &str, bytes: &[u8]) -> Result<(), anyhow
     Ok(())
 }
 
-async fn enqueue_pending(root: &PathBuf, id: &str, upd: PendingUpdate) -> Result<(), anyhow::Error> {
+async fn enqueue_pending(
+    root: &PathBuf,
+    id: &str,
+    upd: PendingUpdate,
+) -> Result<(), anyhow::Error> {
     let dir = root.join("pending_updates");
     fs::create_dir_all(&dir).await.ok();
     let path = dir.join(format!("{}.json", id));
@@ -614,22 +631,23 @@ async fn replay_pending(root: &PathBuf, id: &str) -> Result<(), anyhow::Error> {
         return Ok(());
     }
 
-    let mut meta = load_metadata(root, id)
-        .await
-        .unwrap_or_else(|_| {
-            let owner = root
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            default_metadata(&owner, None)
-        });
+    let mut meta = load_metadata(root, id).await.unwrap_or_else(|_| {
+        let owner = root
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        default_metadata(&owner, None)
+    });
     for upd in updates {
         match upd {
             PendingUpdate::View { requester, delta } => {
                 let entry = meta.permissions.entry(requester).or_insert(0);
                 *entry = (*entry + delta).max(0);
             }
-            PendingUpdate::Perm { target_user, new_quota } => {
+            PendingUpdate::Perm {
+                target_user,
+                new_quota,
+            } => {
                 meta.permissions.insert(target_user, new_quota);
             }
         }
@@ -640,7 +658,10 @@ async fn replay_pending(root: &PathBuf, id: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn load_pending_requests(root: &PathBuf, id: &str) -> Result<Vec<PendingRequest>, anyhow::Error> {
+async fn load_pending_requests(
+    root: &PathBuf,
+    id: &str,
+) -> Result<Vec<PendingRequest>, anyhow::Error> {
     let dir = root.join("pending_requests");
     let path = dir.join(format!("{}.json", id));
     if let Ok(data) = fs::read(&path).await {
@@ -651,7 +672,11 @@ async fn load_pending_requests(root: &PathBuf, id: &str) -> Result<Vec<PendingRe
     }
 }
 
-async fn save_pending_requests(root: &PathBuf, id: &str, reqs: &[PendingRequest]) -> Result<(), anyhow::Error> {
+async fn save_pending_requests(
+    root: &PathBuf,
+    id: &str,
+    reqs: &[PendingRequest],
+) -> Result<(), anyhow::Error> {
     let dir = root.join("pending_requests");
     fs::create_dir_all(&dir).await.ok();
     let path = dir.join(format!("{}.json", id));
@@ -737,7 +762,10 @@ fn extract_metadata_from_png(img_bytes: &[u8], owner_hint: &str) -> anyhow::Resu
     let blob = extract_n_bytes(&rgba, 4 + len)?;
     let meta: Metadata = serde_json::from_slice(&blob[4..])?;
     if meta.owner.is_empty() && !owner_hint.is_empty() {
-        return Ok(Metadata { owner: owner_hint.to_string(), ..meta });
+        return Ok(Metadata {
+            owner: owner_hint.to_string(),
+            ..meta
+        });
     }
     Ok(meta)
 }
