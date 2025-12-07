@@ -439,6 +439,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
     const WS_URL = "{{WS_URL}}";
+    const P2P_BASE = "http://192.168.8.247:10000";
     const DEFAULT_P2P_PORT = 10000;
     const LAUNCH_PORT_DEFAULT = 10002;
     let presenceWs = null;
@@ -704,7 +705,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             try { uploadTarget = await resolvePeer(currentUser); } catch (_) {}
             const p2pIp = uploadTarget?.ip || currentIp;
             const p2pPort = uploadTarget?.port || DEFAULT_P2P_PORT;
-            const p2pUrl = `http://${p2pIp}:${p2pPort}/upload-image`;
+            const p2pUrl = `${P2P_BASE}/upload-image`;
             await fetch(p2pUrl, { method: 'POST', body: fdUpload });
 
             // Download locally for user convenience
@@ -819,14 +820,16 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       const peers = await getOnlinePeers();
       const results = [];
       for (const peer of peers) {
-        const url = `http://${peer.ip}:${peer.port}/list-images?requester=${encodeURIComponent(currentUser || '')}`;
+        const owner = peer.user;
+        if (!owner) continue;
+        const url = `${P2P_BASE}/list-images?owner=${encodeURIComponent(owner)}&requester=${encodeURIComponent(currentUser || '')}`;
         try {
           const res = await fetch(url);
           const json = await res.json();
-          const images = (json.images || []).filter(img => !img.owner || img.owner === peer.user);
+          const images = (json.images || []).filter(img => !img.owner || img.owner === owner);
           results.push({
-            user: peer.user,
-            username: peer.user,
+            user: owner,
+            username: owner,
             online: true,
             ip: peer.ip,
             p2p_port: peer.port,
@@ -876,7 +879,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     async function refreshOwnerRequests() {
       if (!currentUser || !currentIp) { return; }
       try {
-        const url = `http://${currentIp}:${DEFAULT_P2P_PORT}/list-images?requester=${encodeURIComponent(currentUser)}`;
+        const url = `${P2P_BASE}/list-images?owner=${encodeURIComponent(currentUser)}&requester=${encodeURIComponent(currentUser)}`;
         const res = await fetch(url);
         if (!res.ok) return;
         const data = await res.json();
@@ -941,7 +944,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       try {
         const info = await resolvePeer(peer);
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
-        const url = `http://${info.ip}:${info.port}/preview/${encodeURIComponent(imgId)}`;
+        const owner = info.user || peer;
+        const url = `${P2P_BASE}/preview/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
         const { ct, buf } = await fetchBinary(url);
         if (ct.startsWith('image/')) {
           const blob = new Blob([buf], { type: ct });
@@ -964,7 +968,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       try {
         const info = await resolvePeer(peer);
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
-        const url = `http://${info.ip}:${info.port}/full/${encodeURIComponent(imgId)}?requester=${encodeURIComponent(currentUser)}`;
+        const owner = info.user || peer;
+        const url = `${P2P_BASE}/full/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}?requester=${encodeURIComponent(currentUser)}`;
         const res = await fetch(url);
         const ct = res.headers.get('content-type') || '';
         if (ct.startsWith('image/')) {
@@ -981,7 +986,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           const decBlob = await decRes.blob();
           // Mark the view as consumed only after successful decrypt
           try {
-            const consumeUrl = `http://${info.ip}:${info.port}/consume-view/${encodeURIComponent(imgId)}`;
+            const consumeUrl = `${P2P_BASE}/consume-view/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
             await fetch(consumeUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1022,7 +1027,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         if (!approved || approved <= 0) { text('#requestsList', 'Approved views must be positive'); return; }
         const passInput = document.getElementById(`pass-${idx}`);
         const passphrase = (passInput?.value || '').trim();
-        const url = `http://${currentIp}:${DEFAULT_P2P_PORT}/approve-request/${encodeURIComponent(req.image)}`;
+        const url = `${P2P_BASE}/approve-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
         await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1033,7 +1038,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const idx = parseInt(btn.dataset.idx || '-1', 10);
         const req = pendingCache[idx];
         if (!req) return;
-        const url = `http://${currentIp}:${DEFAULT_P2P_PORT}/reject-request/${encodeURIComponent(req.image)}`;
+        const url = `${P2P_BASE}/reject-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
         await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1053,7 +1058,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         // For requests we allow targeting offline peers using last-known IP/port
         const info = await resolvePeer(peer, { allowOffline: true });
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
-        const url = `http://${info.ip}:${info.port}/request-image/${encodeURIComponent(imgId)}`;
+        const owner = info.user || peer;
+        const url = `${P2P_BASE}/request-image/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
         const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

@@ -39,6 +39,13 @@ struct Args {
     /// Base port for client API (actual port = base + node id)
     #[arg(long, default_value_t = 9000, value_parser = clap::value_parser!(u16).range(1..))]
     client_base_port: u16,
+    /// Base URL of central P2P image server
+    #[arg(
+        long,
+        env = "CLOUDP2P_P2P_BASE",
+        default_value = "http://192.168.8.247:10000"
+    )]
+    p2p_base: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,6 +163,7 @@ struct NetNode {
     // Bounded pool for CPU-heavy crypto tasks
     crypto_workers: Arc<Semaphore>,
     http_client: Client,
+    pub p2p_base_url: String,
 }
 
 impl NetNode {
@@ -165,6 +173,7 @@ impl NetNode {
         client_base_port: u16,
         client_listen_addr: SocketAddr,
         client_public_addr: SocketAddr,
+        p2p_base_url: String,
     ) -> Self {
         let peers_arc = Arc::new(peers);
         let peer_ids: Vec<u32> = peers_arc.keys().cloned().collect();
@@ -202,6 +211,7 @@ impl NetNode {
             client_public_addr,
             crypto_workers: Arc::new(Semaphore::new(MAX_CRYPTO_WORKERS)),
             http_client: Client::new(),
+            p2p_base_url,
         }
     }
 
@@ -1889,12 +1899,13 @@ impl NetNode {
         }
     }
 
-    async fn sync_user_metadata(&self, user: &str, ip: &str, p2p_port: u16) {
-        if ip.is_empty() {
+    async fn sync_user_metadata(&self, user: &str, _ip: &str, _p2p_port: u16) {
+        if self.p2p_base_url.trim().is_empty() {
             return;
         }
         let cached = self.image_metadata.read().await.get(user).cloned();
-        let url = format!("http://{}:{}/list-images?requester={}", ip, p2p_port, user);
+        let base = self.p2p_base_url.trim_end_matches('/');
+        let url = format!("{}/list-images?owner={}&requester={}", base, user, user);
         let client = self.http_client.clone();
         let resp = client.get(url).timeout(Duration::from_secs(4)).send().await;
 
@@ -1982,6 +1993,7 @@ async fn main() -> anyhow::Result<()> {
         args.client_base_port,
         client_listen,
         client_public,
+        args.p2p_base,
     ));
     node.clone().start(listen).await?;
     // keep alive
