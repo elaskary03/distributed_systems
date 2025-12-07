@@ -1132,7 +1132,7 @@ impl NetNode {
                                 tokio::spawn(async move {
                                     let _permit = workers.acquire_owned().await;
 
-                                    let plaintext_bytes = if is_http_url(&input_path) {
+                                    let secret_bytes = if is_http_url(&input_path) {
                                         match http_client
                                             .get(&input_path)
                                             .timeout(Duration::from_secs(12))
@@ -1176,15 +1176,61 @@ impl NetNode {
                                         }
                                     };
 
+                                    // Cover image used for embedding (may be file path or URL)
+                                    let cover_path = "images/cover_image.PNG".to_string();
+                                    let cover_bytes = if is_http_url(&cover_path) {
+                                        match http_client
+                                            .get(&cover_path)
+                                            .timeout(Duration::from_secs(12))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(resp) => match resp.error_for_status() {
+                                                Ok(r) => match r.bytes().await {
+                                                    Ok(b) => b.to_vec(),
+                                                    Err(e) => {
+                                                        error!("Node {}: failed to read cover HTTP body {}: {:?}", node_id, cover_path, e);
+                                                        return;
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    error!(
+                                                        "Node {}: HTTP fetch failed {}: {:?}",
+                                                        node_id, cover_path, e
+                                                    );
+                                                    return;
+                                                }
+                                            },
+                                            Err(e) => {
+                                                error!(
+                                                    "Node {}: HTTP request failed {}: {:?}",
+                                                    node_id, cover_path, e
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    } else {
+                                        match tokio::fs::read(&cover_path).await {
+                                            Ok(b) => b,
+                                            Err(e) => {
+                                                error!(
+                                                    "Node {}: failed to read cover {}: {:?}",
+                                                    node_id, cover_path, e
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    };
+
                                     let crypto = tokio::task::spawn_blocking(move || {
                                         use image::ImageOutputFormat;
 
-                                        // Encrypt plaintext and embed payload into the original image bytes
+                                        // Encrypt secret and embed payload into the cover image
                                         let (nonce, ciphertext) =
-                                            encrypt_bytes(passphrase.as_bytes(), &plaintext_bytes)?;
+                                            encrypt_bytes(passphrase.as_bytes(), &secret_bytes)?;
                                         let payload = pack_embed_blob(&nonce, &ciphertext);
                                         let rgba =
-                                            image::load_from_memory(&plaintext_bytes)?.to_rgba8();
+                                            image::load_from_memory(&cover_bytes)?.to_rgba8();
                                         let mut blob = Vec::with_capacity(payload.len());
                                         blob.extend_from_slice(&payload);
                                         let stego = embed_lsb_rgba(&rgba, &blob)?;
