@@ -319,43 +319,30 @@ async fn full_image(
         None => return (StatusCode::BAD_REQUEST, "missing requester").into_response(),
     };
 
-    let mut meta = match load_metadata(&paths.meta, &image_id).await {
+    let meta = match load_metadata(&paths.meta, &image_id).await {
         Ok(m) => m,
         Err(_) => {
-            let _ = enqueue_pending(
-                &paths.meta,
-                &image_id,
-                PendingUpdate::View {
-                    requester: requester.clone(),
-                    delta: -1,
-                },
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "no permission"})),
             )
-            .await;
-            return (StatusCode::OK, "QUOTA_EXHAUSTED").into_response();
+                .into_response()
         }
     };
 
     if requester != meta.owner {
         let quota = meta.permissions.get(&requester).copied().unwrap_or(0);
         if quota <= 0 {
-            return (StatusCode::OK, "QUOTA_EXHAUSTED").into_response();
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "no permission"})),
+            )
+                .into_response();
         }
     }
 
     match load_image(&paths.encrypted, &image_id).await {
-        Ok(bytes) => {
-            let cd = format!("inline; filename=\"{}.png\"", image_id);
-            (
-                StatusCode::OK,
-                [
-                    ("content-type", "image/png".to_string()),
-                    ("content-disposition", cd),
-                    ("cache-control", "no-store".to_string()),
-                ],
-                bytes,
-            )
-                .into_response()
-        }
+        Ok(bytes) => (StatusCode::OK, [("content-type", "image/png")], bytes).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
