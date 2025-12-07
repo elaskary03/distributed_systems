@@ -2,10 +2,12 @@ use bytes::Bytes;
 use clap::Parser;
 use cloud_p2p_raft::crypto::{embed_lsb_rgba, encrypt_bytes, pack_embed_blob, sha256_hex};
 use futures::{SinkExt, StreamExt};
+use gcp_auth::AuthenticationManager;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::env;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -69,6 +71,85 @@ pub struct UserEntry {
     pub p2p_port: u16,
     pub online: bool,
     pub last_seen: u128,
+}
+
+#[derive(Clone)]
+struct FirebaseClient {
+    project_id: String,
+    collection: String,
+    auth: Arc<AuthenticationManager>,
+    http: Client,
+}
+
+impl FirebaseClient {
+    async fn from_env() -> anyhow::Result<Option<Self>> {
+        let project_id = match env::var("FIREBASE_PROJECT_ID") {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => return Ok(None),
+        };
+        let collection = env::var("FIREBASE_USERS_COLLECTION")
+            .unwrap_or_else(|_| "users".to_string());
+        let auth = AuthenticationManager::builder().build().await?;
+        Ok(Some(Self {
+            project_id,
+            collection,
+            auth: Arc::new(auth),
+            http: Client::new(),
+        }))
+    }
+
+    async fn upsert_user(&self, entry: &UserEntry) -> anyhow::Result<()> {
+        let body = json!({
+            "fields": {
+                "ip": { "stringValue": entry.ip },
+                "p2p_port": { "integerValue": entry.p2p_port.to_string() },
+                "online": { "booleanValue": entry.online },
+                "last_seen": { "integerValue": entry.last_seen.to_string() }
+            }
+        });
+        self.patch(&entry.username, body, &["ip", "p2p_port", "online", "last_seen"])
+            .await
+    }
+
+    async fn mark_offline(&self, username: &str, last_seen: u128) -> anyhow::Result<()> {
+        let body = json!({
+            "fields": {
+                "online": { "booleanValue": false },
+                "last_seen": { "integerValue": last_seen.to_string() }
+            }
+        });
+        self.patch(username, body, &["online", "last_seen"]).await
+    }
+
+    async fn patch(&self, doc_id: &str, body: Value, mask: &[&str]) -> anyhow::Result<()> {
+        let token = self
+            .auth
+            .get_token(&["https://www.googleapis.com/auth/datastore"])
+            .await?;
+        let mask_query = if mask.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "?{}",
+                mask.iter()
+                    .map(|f| format!("updateMask.fieldPaths={}", f))
+                    .collect::<Vec<_>>()
+                    .join("&")
+            )
+        };
+        let url = format!(
+            "https://firestore.googleapis.com/v1/projects/{}/databases/(default)/documents/{}/{}{}",
+            self.project_id, self.collection, doc_id, mask_query
+        );
+        self.http
+            .patch(url)
+            .bearer_auth(token.as_str())
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +245,7 @@ struct NetNode {
     crypto_workers: Arc<Semaphore>,
     http_client: Client,
     pub p2p_base_url: String,
+    firebase: Option<FirebaseClient>,
 }
 
 impl NetNode {
@@ -174,6 +256,7 @@ impl NetNode {
         client_listen_addr: SocketAddr,
         client_public_addr: SocketAddr,
         p2p_base_url: String,
+        firebase: Option<FirebaseClient>,
     ) -> Self {
         let peers_arc = Arc::new(peers);
         let peer_ids: Vec<u32> = peers_arc.keys().cloned().collect();
@@ -212,6 +295,7 @@ impl NetNode {
             crypto_workers: Arc::new(Semaphore::new(MAX_CRYPTO_WORKERS)),
             http_client: Client::new(),
             p2p_base_url,
+            firebase,
         }
     }
 
@@ -1055,18 +1139,19 @@ impl NetNode {
                             if let (Some(user), Some(ip)) = (parts.next(), parts.next()) {
                                 let port: u16 =
                                     parts.next().unwrap_or("10000").parse().unwrap_or(10000);
-                                let mut map = self.registered_users.write().await;
-                                map.insert(
-                                    user.to_string(),
-                                    UserEntry {
-                                        username: user.to_string(),
-                                        ip: ip.to_string(),
-                                        p2p_port: port,
-                                        online: true,
-                                        last_seen: Self::now_nanos(),
-                                    },
-                                );
+                                let entry = UserEntry {
+                                    username: user.to_string(),
+                                    ip: ip.to_string(),
+                                    p2p_port: port,
+                                    online: true,
+                                    last_seen: Self::now_nanos(),
+                                };
+                                {
+                                    let mut map = self.registered_users.write().await;
+                                    map.insert(user.to_string(), entry.clone());
+                                }
                                 info!("Node {}: Applied REGISTER {} {}", self.id, user, ip);
+                                self.push_user_to_firebase(entry.clone()).await;
                                 let node = self.clone();
                                 let user_s = user.to_string();
                                 let ip_s = ip.to_string();
@@ -1083,6 +1168,7 @@ impl NetNode {
                         Some("UNREGISTER") => {
                             if let Some(user) = parts.next() {
                                 let user_s = user.to_string();
+                                let last_seen = Self::now_nanos();
                                 let (ip, p2p_port) = {
                                     let mut map = self.registered_users.write().await;
                                     let entry = map.entry(user_s.clone()).or_insert(UserEntry {
@@ -1090,13 +1176,14 @@ impl NetNode {
                                         ip: String::new(),
                                         p2p_port: 10000,
                                         online: false,
-                                        last_seen: Self::now_nanos(),
+                                        last_seen,
                                     });
                                     entry.online = false;
                                     // Keep prior IP/port so offline users still show up with context
-                                    entry.last_seen = Self::now_nanos();
+                                    entry.last_seen = last_seen;
                                     (entry.ip.clone(), entry.p2p_port)
                                 };
+                                self.push_user_offline(user_s.clone(), last_seen).await;
                                 // Try to capture a final metadata snapshot before the owner goes offline.
                                 if !ip.is_empty() {
                                     let node = self.clone();
@@ -1341,10 +1428,13 @@ impl NetNode {
                                 });
                                 entry.p2p_port = p2p_port;
                                 entry.last_seen = Self::now_nanos();
+                                let entry_clone = entry.clone();
                                 info!(
                                     "Node {}: Applied SET_P2P_PORT {} {}",
                                     self.id, user, p2p_port
                                 );
+                                drop(map);
+                                self.push_user_to_firebase(entry_clone).await;
                             } else {
                                 info!(
                                     "Node {}: Malformed SET_P2P_PORT command '{}'",
@@ -1950,6 +2040,28 @@ impl NetNode {
         }
     }
 
+    async fn push_user_to_firebase(&self, entry: UserEntry) {
+        if let Some(firebase) = &self.firebase {
+            let client = firebase.clone();
+            tokio::spawn(async move {
+                if let Err(e) = client.upsert_user(&entry).await {
+                    error!("Firebase upsert failed for {}: {:?}", entry.username, e);
+                }
+            });
+        }
+    }
+
+    async fn push_user_offline(&self, username: String, last_seen: u128) {
+        if let Some(firebase) = &self.firebase {
+            let client = firebase.clone();
+            tokio::spawn(async move {
+                if let Err(e) = client.mark_offline(&username, last_seen).await {
+                    error!("Firebase offline update failed for {}: {:?}", username, e);
+                }
+            });
+        }
+    }
+
     async fn sync_user_metadata(&self, user: &str, _ip: &str, _p2p_port: u16) {
         if self.p2p_base_url.trim().is_empty() {
             return;
@@ -2038,6 +2150,19 @@ async fn main() -> anyhow::Result<()> {
         args.client_host.parse()?
     };
     let client_public = SocketAddr::new(advertise_ip, client_port);
+    let firebase = match FirebaseClient::from_env().await? {
+        Some(client) => {
+            info!(
+                "Firebase sync enabled: project={} collection={}",
+                client.project_id, client.collection
+            );
+            Some(client)
+        }
+        None => {
+            info!("Firebase sync disabled (set FIREBASE_PROJECT_ID to enable)");
+            None
+        }
+    };
     let node = Arc::new(NetNode::new(
         args.id,
         peers_map,
@@ -2045,6 +2170,7 @@ async fn main() -> anyhow::Result<()> {
         client_listen,
         client_public,
         args.p2p_base,
+        firebase,
     ));
     node.clone().start(listen).await?;
     // keep alive
