@@ -100,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/upload-image", post(upload_image))
+        .route("/upload-stego", post(upload_image))
         .route("/list-images", get(list_images))
         .route("/preview/:owner/:image_id", get(preview_image))
         .route("/full/:owner/:image_id", get(full_image))
@@ -191,18 +192,20 @@ async fn upload_image(
         meta.permissions = p;
     }
 
-    let original_bytes = preview_bytes.clone().unwrap_or_else(|| stego_bytes.clone());
+    // Only use provided original bytes for preview/original; never derive from stego
+    if let Some(ref original_bytes) = preview_bytes {
+        if let Err(e) = save_image(&owner_paths.original, &image_id, original_bytes).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("save original: {e}"),
+            )
+                .into_response();
+        }
 
-    if let Err(e) = save_image(&owner_paths.original, &image_id, &original_bytes).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("save original: {e}"),
-        )
-            .into_response();
-    }
-
-    if let Err(e) = save_preview_image(&owner_paths.encrypted, &image_id, &original_bytes).await {
-        eprintln!("preview save failed for {}: {}", image_id, e);
+        if let Err(e) = save_preview_image(&owner_paths.encrypted, &image_id, original_bytes).await
+        {
+            eprintln!("preview save failed for {}: {}", image_id, e);
+        }
     }
 
     meta.last_update_ns = now_nanos();
