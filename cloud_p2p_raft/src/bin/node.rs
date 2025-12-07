@@ -89,7 +89,7 @@ impl FirebaseClient {
         };
         let collection = env::var("FIREBASE_USERS_COLLECTION")
             .unwrap_or_else(|_| "users".to_string());
-        let auth = AuthenticationManager::builder().build().await?;
+        let auth = AuthenticationManager::new().await?;
         Ok(Some(Self {
             project_id,
             collection,
