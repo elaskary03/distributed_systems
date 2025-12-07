@@ -1311,7 +1311,7 @@ async fn api_upload_stego(
 }
 
 /* =========================
-Find stego path for an image_id (search both uploads/ and stego/)
+Find stego path for an image_id (stego/, optional uploads/ fallback)
 ========================= */
 async fn api_find_stego(
     State(st): State<AppState>,
@@ -1320,6 +1320,10 @@ async fn api_find_stego(
     let Some(image_id) = q.get("image_id").cloned() else {
         return (StatusCode::BAD_REQUEST, "missing image_id").into_response();
     };
+    let include_uploads = q
+        .get("include_uploads")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     // Helper to scan a directory and return a served path prefix
     async fn scan_dir_for_id(dir: &PathBuf, web_prefix: &str, image_id: &str) -> Option<String> {
@@ -1339,13 +1343,14 @@ async fn api_find_stego(
         None
     }
 
-    // 1) search uploads/
-    if let Some(p) = scan_dir_for_id(&st.uploads_dir, "/files/uploads", &image_id).await {
-        return (StatusCode::OK, Json(FindStegoResp { stego_path: p })).into_response();
-    }
-    // 2) search stego/
+    // Prefer stego dir; only fall back to uploads when explicitly requested.
     if let Some(p) = scan_dir_for_id(&st.stego_dir, "/files/stego", &image_id).await {
         return (StatusCode::OK, Json(FindStegoResp { stego_path: p })).into_response();
+    }
+    if include_uploads {
+        if let Some(p) = scan_dir_for_id(&st.uploads_dir, "/files/uploads", &image_id).await {
+            return (StatusCode::OK, Json(FindStegoResp { stego_path: p })).into_response();
+        }
     }
 
     (StatusCode::NOT_FOUND, "not found").into_response()
