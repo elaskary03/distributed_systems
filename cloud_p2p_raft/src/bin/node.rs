@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use clap::Parser;
-use cloud_p2p_raft::crypto::encrypt_and_embed_to_png;
+use cloud_p2p_raft::crypto::{embed_lsb_rgba, encrypt_bytes, pack_embed_blob, sha256_hex};
 use futures::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -1125,7 +1125,6 @@ impl NetNode {
                                 let input_path = input_path.to_string();
                                 let output_path = output_path.to_string();
                                 let passphrase = passphrase.to_string();
-                                let cover_path = "images/cover_image.PNG".to_string();
                                 let workers = self.crypto_workers.clone();
                                 let node_id = self.id;
                                 let http_client = self.http_client.clone();
@@ -1177,23 +1176,29 @@ impl NetNode {
                                         }
                                     };
 
-                                    let cover_bytes = match tokio::fs::read(&cover_path).await {
-                                        Ok(b) => b,
-                                        Err(e) => {
-                                            error!(
-                                                "Node {}: failed to read cover image {}: {:?}",
-                                                node_id, cover_path, e
-                                            );
-                                            return;
-                                        }
-                                    };
-
                                     let crypto = tokio::task::spawn_blocking(move || {
-                                        encrypt_and_embed_to_png(
-                                            passphrase.as_bytes(),
-                                            &plaintext_bytes,
-                                            &cover_bytes,
-                                        )
+                                        use image::ImageOutputFormat;
+
+                                        // Encrypt plaintext and embed payload into the original image bytes
+                                        let (nonce, ciphertext) =
+                                            encrypt_bytes(passphrase.as_bytes(), &plaintext_bytes)?;
+                                        let payload = pack_embed_blob(&nonce, &ciphertext);
+                                        let rgba =
+                                            image::load_from_memory(&plaintext_bytes)?.to_rgba8();
+                                        let mut blob = Vec::with_capacity(payload.len());
+                                        blob.extend_from_slice(&payload);
+                                        let stego = embed_lsb_rgba(&rgba, &blob)?;
+                                        let mut out = Vec::new();
+                                        stego.write_to(
+                                            &mut std::io::Cursor::new(&mut out),
+                                            ImageOutputFormat::Png,
+                                        )?;
+                                        let ct_sha = sha256_hex(&ciphertext);
+                                        Ok::<(Vec<u8>, String, usize), anyhow::Error>((
+                                            out,
+                                            ct_sha,
+                                            payload.len(),
+                                        ))
                                     })
                                     .await;
 
