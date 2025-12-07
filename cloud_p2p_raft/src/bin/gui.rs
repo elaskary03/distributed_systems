@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Multipart, State},
+    extract::{ConnectInfo, Multipart, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -59,7 +59,10 @@ API payloads
 #[derive(Deserialize)]
 struct RegisterReq {
     user: String,
-    ip: String,
+    #[allow(dead_code)]
+    password: Option<String>,
+    ip: Option<String>, // ignored; kept for backward compatibility
+    port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -144,7 +147,8 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = args.listen.parse()?;
     println!("🖥️  GUI available at http://{}", addr);
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .await?;
     Ok(())
 }
 
@@ -270,8 +274,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           <input id="loginUser" type="text" placeholder="alice" required>
         </div>
         <div>
-          <label>IP Address</label>
-          <input id="loginIp" type="text" placeholder="10.0.0.1" required>
+          <label>Password</label>
+          <input id="loginPass" type="password" placeholder="optional">
         </div>
       </div>
       <div style="margin-top:10px" class="btns">
@@ -444,7 +448,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     const LAUNCH_PORT_DEFAULT = 10002;
     let presenceWs = null;
     let currentUser = "";
-    let currentIp = "";
     let cachedUsersList = "";
     let manualLogout = false;
     let pendingCache = [];
@@ -487,7 +490,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
     // Maintain a websocket presence session. Server auto-unregisters on disconnect.
     function connectPresence() {
-      if (!currentUser || !currentIp) return;
+      if (!currentUser) return;
 
       if (presenceWs && (presenceWs.readyState === WebSocket.OPEN || presenceWs.readyState === WebSocket.CONNECTING)) {
         return;
@@ -496,7 +499,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       presenceWs = new WebSocket(WS_URL);
       presenceWs.onopen = () => {
         manualLogout = false;
-        try { presenceWs.send(`REGISTER ${currentUser} ${currentIp} ${DEFAULT_P2P_PORT}`); } catch (e) { console.error(e); }
+        try { presenceWs.send(`REGISTER ${currentUser} ${DEFAULT_P2P_PORT}`); } catch (e) { console.error(e); }
       };
       presenceWs.onmessage = (evt) => {
         if (typeof evt.data === 'string') {
@@ -510,7 +513,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         cachedUsersList = "";
         clearOutputs();
         currentUser = "";
-        currentIp = "";
         showMainUI(false);
         document.getElementById('sessionLabel').textContent = 'Logged in as: -';
         text('#loginOut', 'Connection closed. Please log in again.');
@@ -642,15 +644,14 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     /* Login */
     $('#loginBtn').addEventListener('click', async () => {
       const user = ($('#loginUser').value || '').trim();
-      const ip = ($('#loginIp').value || '').trim();
-      if (!user || !ip) {
-        text('#loginOut', 'Username and IP are required');
+      const pass = ($('#loginPass').value || '').trim();
+      if (!user) {
+        text('#loginOut', 'Username is required');
         document.getElementById('loginOut').style.display = 'block';
         return;
       }
       currentUser = user;
-      currentIp = ip;
-      document.getElementById('sessionLabel').textContent = `Logged in as: ${user} (${ip})`;
+      document.getElementById('sessionLabel').textContent = `Logged in as: ${user} (IP auto)`;
       showMainUI(true);
       document.getElementById('loginOut').style.display = 'none';
       clearOutputs();
@@ -703,8 +704,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
             let uploadTarget = null;
             try { uploadTarget = await resolvePeer(currentUser); } catch (_) {}
-            const p2pIp = uploadTarget?.ip || currentIp;
-            const p2pPort = uploadTarget?.port || DEFAULT_P2P_PORT;
             const p2pUrl = `${P2P_BASE}/upload-image`;
             await fetch(p2pUrl, { method: 'POST', body: fdUpload });
 
@@ -877,7 +876,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     }
 
     async function refreshOwnerRequests() {
-      if (!currentUser || !currentIp) { return; }
+      if (!currentUser) { return; }
       try {
         const url = `${P2P_BASE}/list-images?owner=${encodeURIComponent(currentUser)}&requester=${encodeURIComponent(currentUser)}`;
         const res = await fetch(url);
@@ -1119,7 +1118,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         });
       } catch (_) {}
       currentUser = "";
-      currentIp = "";
       cachedUsersList = "";
       manualLogout = true;
       if (presenceWs) { try { presenceWs.close(); } catch (_) {} presenceWs = null; }
@@ -1154,12 +1152,18 @@ API handlers
 
 async fn api_register(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(payload): Json<RegisterReq>,
 ) -> impl IntoResponse {
-    if payload.user.trim().is_empty() || payload.ip.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "user and ip are required").into_response();
+    if payload.user.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "user is required").into_response();
     }
-    let line = format!("REGISTER {} {}", payload.user, payload.ip);
+    let ip = payload
+        .ip
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| peer.ip().to_string());
+    let port = payload.port.unwrap_or(10000);
+    let line = format!("REGISTER {} {} {}", payload.user, ip, port);
     proxy_send_oneline(&st.proxy_addr, &line)
         .await
         .into_response()

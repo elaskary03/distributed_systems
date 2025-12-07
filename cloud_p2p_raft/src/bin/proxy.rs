@@ -130,6 +130,10 @@ async fn handle_ws(
     cfg: ProxyCfg,
     ws_tx: broadcast::Sender<String>,
 ) -> anyhow::Result<()> {
+    let peer_ip = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
     let mut ws = accept_async(stream).await?;
     let mut current_user: Option<String> = None;
     let mut ws_ping = tokio::time::interval(Duration::from_secs(20));
@@ -163,10 +167,20 @@ async fn handle_ws(
                     let text = msg.into_text()?;
                     let mut parts = text.split_whitespace();
                     match (parts.next(), parts.next(), parts.next(), parts.next()) {
-                        (Some("REGISTER"), Some(user), Some(ip), Some(port)) => {
+                        (Some("REGISTER"), Some(user), arg2, arg3) => {
                             current_user = Some(user.to_string());
-                                let op_id = next_op_id();
-                                let payload = format!("SUBMIT {} REGISTER {} {} {}", op_id, user, ip, port);
+                            let (ip, port_s) = match (arg2, arg3) {
+                                // New format: REGISTER <user> <port>
+                                (Some(port), None) => (peer_ip.clone(), port.to_string()),
+                                // Legacy: REGISTER <user> <ip> <port>
+                                (Some(ip), Some(port)) => (ip.to_string(), port.to_string()),
+                                // Fallbacks
+                                (None, Some(port)) => (peer_ip.clone(), port.to_string()),
+                                (None, None) => (peer_ip.clone(), "10000".to_string()),
+                            };
+                            let port: u16 = port_s.parse().unwrap_or(10000);
+                            let op_id = next_op_id();
+                            let payload = format!("SUBMIT {} REGISTER {} {} {}", op_id, user, ip, port);
                             if let Ok(s) = submit_idempotent(&seeds, &cfg, &payload).await {
                                 let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(s)).await;
                                 broadcast_users(&seeds, &ws_tx).await;
@@ -214,13 +228,17 @@ async fn handle_client(
     cfg: ProxyCfg,
     ws_tx: broadcast::Sender<String>,
 ) -> anyhow::Result<()> {
+    let peer_ip = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .ok();
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     let mut line = String::new();
 
     // Present a simple banner (your proxy protocol)
     w.write_all(b"Welcome to Cloud P2P Proxy!\n").await?;
-    w.write_all(b"Commands: REGISTER <user> <ip> | UNREGISTER <user> | LIST_PEERS | SHOW_USERS | IMAGE_METADATA | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
+    w.write_all(b"Commands: REGISTER <user> [ip] [p2p_port] | UNREGISTER <user> | LIST_PEERS | SHOW_USERS | IMAGE_METADATA | LIST | LEADER | ENCRYPT_IMAGE <id> <passphrase> <input> <output> | DECRYPT_IMAGE <passphrase> <stego_png> <output>\n").await?;
 
     loop {
         line.clear();
@@ -242,17 +260,16 @@ async fn handle_client(
                 let user = match parts.next() {
                     Some(x) => x,
                     None => {
-                        w.write_all(b"Usage: REGISTER <user> <ip>\n").await?;
+                        w.write_all(b"Usage: REGISTER <user> [ip] [p2p_port]\n").await?;
                         continue;
                     }
                 };
-                let ip = match parts.next() {
-                    Some(x) => x,
-                    None => {
-                        w.write_all(b"Usage: REGISTER <user> <ip>\n").await?;
-                        continue;
-                    }
-                };
+                let ip = parts
+                    .next()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.to_string())
+                    .or_else(|| peer_ip.clone())
+                    .unwrap_or_else(|| "0.0.0.0".to_string());
                 let port = parts.next().unwrap_or("10000");
 
                 let op_id = next_op_id();
