@@ -51,35 +51,35 @@ pub fn decrypt_bytes(passphrase: &[u8], nonce: &Nonce, ciphertext: &[u8]) -> Res
 }
 
 /// Pack (nonce, ciphertext) into our stego payload format:
-/// [12 bytes nonce][4 bytes big-endian length][ciphertext bytes]
+/// [8-byte big-endian u64 total_len | nonce | ciphertext]
 pub fn pack_embed_blob(nonce: &Nonce, ciphertext: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12 + 4 + ciphertext.len());
-    out.extend_from_slice(nonce.as_ref());
-    out.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+    let nonce_bytes = nonce.as_slice();
+    let total_len = nonce_bytes.len() + ciphertext.len();
+    let mut out = Vec::with_capacity(8 + total_len);
+    out.extend_from_slice(&(total_len as u64).to_be_bytes());
+    out.extend_from_slice(nonce_bytes);
     out.extend_from_slice(ciphertext);
     out
 }
 
 /// Unpack our stego payload format back into (nonce, ciphertext).
 pub fn unpack_embed_blob(data: &[u8]) -> Result<(Nonce, Vec<u8>)> {
-    if data.len() < 12 + 4 {
+    if data.len() < 8 + 12 {
         bail!("embed blob too small");
     }
-    let nonce_bytes = &data[..12];
-    let len_bytes = &data[12..16];
-    let cipher_len = u32::from_be_bytes(len_bytes.try_into().unwrap()) as usize;
-
-    if data.len() < 16 + cipher_len {
-        bail!(
-            "embed blob truncated (expected {} bytes of ciphertext)",
-            cipher_len
-        );
+    let total_len = u64::from_be_bytes(data[..8].try_into().unwrap()) as usize;
+    if total_len < 12 {
+        bail!("embed blob length too small");
+    }
+    if data.len() < 8 + total_len {
+        bail!("embed blob truncated (expected {} bytes)", total_len);
     }
 
+    let payload = &data[8..8 + total_len];
     let mut nonce_arr = [0u8; 12];
-    nonce_arr.copy_from_slice(nonce_bytes);
+    nonce_arr.copy_from_slice(&payload[..12]);
     let nonce = *Nonce::from_slice(&nonce_arr);
-    let ciphertext = data[16..16 + cipher_len].to_vec();
+    let ciphertext = payload[12..].to_vec();
 
     Ok((nonce, ciphertext))
 }
@@ -163,25 +163,19 @@ pub fn extract_n_bytes(img: &RgbaImage, n_bytes: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Extract the full `[nonce | len | ciphertext]` blob from the image:
-/// 1) first read 16 bytes (nonce + length),
-/// 2) parse cipher length, then read exactly that many more bytes,
-/// 3) return (nonce, ciphertext).
+/// Extract the full `[len | nonce | ciphertext]` blob from the image using a length prefix.
 pub fn extract_payload(img: &RgbaImage) -> Result<(Nonce, Vec<u8>)> {
-    // Read header (12-byte nonce + 4-byte big-endian length)
-    let header = extract_n_bytes(img, 16)?;
-    if header.len() != 16 {
-        bail!("header truncated (got {} bytes)", header.len());
+    // Read length prefix (u64 BE)
+    let len_prefix = extract_n_bytes(img, 8)?;
+    if len_prefix.len() != 8 {
+        bail!("header truncated (got {} bytes)", len_prefix.len());
+    }
+    let total_len = u64::from_be_bytes(len_prefix[..8].try_into().unwrap()) as usize;
+    if total_len < 12 {
+        bail!("embedded payload too small for nonce");
     }
 
-    // Parse nonce and ciphertext length directly (no full-blob unpack yet)
-    let mut nonce_arr = [0u8; 12];
-    nonce_arr.copy_from_slice(&header[..12]);
-    let nonce = *Nonce::from_slice(&nonce_arr);
-    let cipher_len = u32::from_be_bytes(header[12..16].try_into().unwrap()) as usize;
-
-    // Sanity check capacity before reading the whole thing
-    let need_total = 16 + cipher_len;
+    let need_total = 8 + total_len;
     let have_bits = img.width() as usize * img.height() as usize * 4;
     let have_total = have_bits / 8;
     if need_total > have_total {
@@ -193,13 +187,8 @@ pub fn extract_payload(img: &RgbaImage) -> Result<(Nonce, Vec<u8>)> {
         );
     }
 
-    // Now read the entire blob (header + ciphertext) and unpack once
     let all = extract_n_bytes(img, need_total)?;
-    // We can skip re-parsing the nonce, but calling unpack keeps format centralized
-    let (nonce2, ciphertext) = unpack_embed_blob(&all)?;
-    if nonce != nonce2 {
-        bail!("nonce mismatch while extracting payload");
-    }
+    let (nonce, ciphertext) = unpack_embed_blob(&all)?;
     Ok((nonce, ciphertext))
 }
 
