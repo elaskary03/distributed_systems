@@ -178,12 +178,17 @@ pub fn extract_payload(img: &RgbaImage) -> Result<(Nonce, Vec<u8>)> {
     let need_total = 8 + total_len;
     let have_bits = img.width() as usize * img.height() as usize * 4;
     let have_total = have_bits / 8;
+
     if need_total > have_total {
+        let need_bits = (need_total as u128) * 8;
+        let have_bits_u128 = (have_total as u128) * 8;
+
         bail!(
-            "not enough bits in image to extract payload: need {} bytes (~{} bits), have ~{} bytes",
+            "not enough bits in image to extract payload: need {} bytes (~{} bits), have ~{} bytes (~{} bits)",
             need_total,
-            need_total * 8,
-            have_total
+            need_bits,
+            have_total,
+            have_bits_u128,
         );
     }
 
@@ -191,6 +196,7 @@ pub fn extract_payload(img: &RgbaImage) -> Result<(Nonce, Vec<u8>)> {
     let (nonce, ciphertext) = unpack_embed_blob(&all)?;
     Ok((nonce, ciphertext))
 }
+
 
 /// Convenience: compute SHA-256 hex of bytes.
 pub fn sha256_hex(bytes: &[u8]) -> String {
