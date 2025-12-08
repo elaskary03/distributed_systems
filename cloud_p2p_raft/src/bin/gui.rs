@@ -249,6 +249,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
       font-size: 13px; white-space: pre-wrap; overflow:auto; max-height: 220px;
     }
+    .blurred { filter: blur(4px); pointer-events: none; user-select: none; }
     .user-row{ border:1px solid var(--border); border-radius:10px; padding:10px; margin-bottom:10px; background:#fff; }
     .user-header{ display:flex; align-items:center; gap:8px; font-weight:700; }
     .status-dot{ width:10px; height:10px; border-radius:50%; display:inline-block; }
@@ -418,6 +419,17 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     </div>
   </div>
 
+  <!-- Offline overlay -->
+  <div id="offlineOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); backdrop-filter: blur(2px); align-items:center; justify-content:center; z-index:1200; padding:20px;">
+    <div style="background:#fff; border-radius:12px; padding:18px; max-width:420px; width:100%; box-shadow:0 20px 50px rgba(0,0,0,.35); display:flex; flex-direction:column; gap:10px; text-align:center;">
+      <h3 style="margin:0;">You are offline</h3>
+      <p style="margin:0; color:#6b7280;">Presence disconnected. Go online to continue sharing and receiving updates.</p>
+      <div class="btns" style="justify-content:center;">
+        <button id="goOnlineBtn" class="btn-accent">Go Online</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const $ = sel => document.querySelector(sel);
     const text = (id, s) => { const el = $(id); if (el) el.textContent = s; };
@@ -438,6 +450,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let manualLogout = false;
     let pendingNewCache = [];
     let pendingMoreCache = [];
+    let offlineUser = "";
     let activeViewer = null;
     let lastViewedContext = null;
     const launchStatus = (msg) => { text('#loginOut', msg); document.getElementById('loginOut').style.display = 'block'; };
@@ -561,6 +574,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     function clearOutputs() {
       ['uploadOut','peersOut','leaderOut','loginOut','peerOut'].forEach(id => text('#'+id, ''));
       const img = $('#peerImg'); if (img) { img.style.display = 'none'; img.src = ''; }
+      const overlay = document.getElementById('offlineOverlay'); if (overlay) overlay.style.display = 'none';
+      const main = document.getElementById('main-app'); if (main) main.classList.remove('blurred');
       closeViewer(false);
     }
 
@@ -1205,18 +1220,32 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           body: JSON.stringify({ user: currentUser })
         });
       } catch (_) {}
-      currentUser = "";
+      offlineUser = currentUser;
       cachedUsersList = "";
       manualLogout = true;
       if (presenceWs) { try { presenceWs.close(); } catch (_) {} presenceWs = null; }
-      clearOutputs();
-      showMainUI(false);
-      document.getElementById('sessionLabel').textContent = 'Logged in as: -';
-      pendingNewCache = [];
-      pendingMoreCache = [];
-      text('#requestsList', '');
-      text('#requestCount', '');
-      document.getElementById('owner-requests').style.display = 'none';
+      const main = document.getElementById('main-app');
+      if (main) { main.classList.add('blurred'); }
+      const overlay = document.getElementById('offlineOverlay');
+      if (overlay) { overlay.style.display = 'flex'; }
+      document.getElementById('sessionLabel').textContent = `Logged in as: ${offlineUser} (offline)`;
+    });
+
+    $('#goOnlineBtn').addEventListener('click', async () => {
+      const user = offlineUser || currentUser;
+      if (!user) { showMainUI(false); return; }
+      currentUser = user;
+      cachedUsersList = "";
+      manualLogout = false;
+      const main = document.getElementById('main-app');
+      if (main) { main.classList.remove('blurred'); }
+      const overlay = document.getElementById('offlineOverlay');
+      if (overlay) { overlay.style.display = 'none'; }
+      document.getElementById('sessionLabel').textContent = `Logged in as: ${currentUser} (online)`;
+      offlineUser = "";
+      connectPresence();
+      await refreshOwnerRequests();
+      await refreshPeerList();
     });
 
   </script>
