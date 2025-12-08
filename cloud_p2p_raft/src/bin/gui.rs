@@ -443,10 +443,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
     const WS_URL = "{{WS_URL}}";
-    const DEFAULT_P2P_PORT = 10000;
     const LAUNCH_PORT_DEFAULT = 10002;
+    const CLIENT_P2P_PORT = 10000;
     const UI_HOST = (window.location && window.location.hostname) ? window.location.hostname : '127.0.0.1';
-    const P2P_BASE = `http://${UI_HOST}:${DEFAULT_P2P_PORT}`;
     let presenceWs = null;
     let currentUser = "";
     let cachedUsersList = "";
@@ -476,7 +475,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     window.addEventListener('beforeunload', sendOfflineBeacon);
     window.addEventListener('pagehide', sendOfflineBeacon);
 
-    async function startLocalClient(user, port = DEFAULT_P2P_PORT) {
+    async function startLocalClient(user, port = CLIENT_P2P_PORT) {
       try {
         const res = await fetch('/api/launcher/launch', {
           method: 'POST',
@@ -501,7 +500,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       presenceWs = new WebSocket(WS_URL);
       presenceWs.onopen = () => {
         manualLogout = false;
-        try { presenceWs.send(`REGISTER ${currentUser} ${DEFAULT_P2P_PORT}`); } catch (e) { console.error(e); }
+        try { presenceWs.send(`REGISTER ${currentUser} ${CLIENT_P2P_PORT}`); } catch (e) { console.error(e); }
       };
       presenceWs.onmessage = (evt) => {
         if (typeof evt.data === 'string') {
@@ -713,8 +712,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
               fdUpload.append('preview', new File([previewBlob], `preview-${fileBase}`, { type: 'image/png' }));
             }
 
-            // For owner uploads, always push to the local client_p2p the GUI controls.
-            const p2pUrl = `${P2P_BASE}/upload-image`;
+            // For owner uploads, push directly to the owner's peer endpoint
+            const ownerBase = await peerBaseByUser(currentUser, { allowOffline: true });
+            const p2pUrl = `${ownerBase}/upload-image`;
             await fetch(p2pUrl, { method: 'POST', body: fdUpload });
 
             // Download locally for user convenience
@@ -778,7 +778,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           return {
             user,
             ip,
-            port: parseInt(port, 10) || DEFAULT_P2P_PORT,
+            port: parseInt(port, 10) || CLIENT_P2P_PORT,
             online: online === 'true',
           };
         })
@@ -792,14 +792,17 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
     function peerBase(peer) {
       if (peer && peer.ip) {
-        const port = peer.port || DEFAULT_P2P_PORT;
+        const port = peer.port || CLIENT_P2P_PORT;
         return `http://${peer.ip}:${port}`;
       }
-      return P2P_BASE; // fallback to local host default
+      throw new Error('peerBase: peer missing or has no IP/port');
     }
 
     async function peerBaseByUser(user, opts = {}) {
       const peer = await resolvePeer(user, opts);
+      if (!peer || !peer.ip) {
+        throw new Error(`peer ${user} not reachable or offline`);
+      }
       return peerBase(peer);
     }
 
@@ -844,9 +847,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       for (const peer of peers) {
         const owner = peer.user;
         if (!owner) continue;
-        const base = peerBase(peer);
-        const url = `${base}/list-images?owner=${encodeURIComponent(owner)}&requester=${encodeURIComponent(currentUser || '')}`;
         try {
+          const base = peerBase(peer);
+          const url = `${base}/list-images?owner=${encodeURIComponent(owner)}&requester=${encodeURIComponent(currentUser || '')}`;
           const res = await fetch(url);
           const json = await res.json();
           const images = (json.images || []).filter(img => !img.owner || img.owner === owner);
@@ -885,7 +888,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           images: u.images || existing.images || [],
           online: u.online !== undefined ? u.online : existing.online,
           ip: u.ip || existing.ip || '',
-          p2p_port: u.p2p_port || existing.p2p_port || DEFAULT_P2P_PORT,
+          p2p_port: u.p2p_port || existing.p2p_port || CLIENT_P2P_PORT,
         });
       }
       return Array.from(map.values());
@@ -919,7 +922,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         text('#requestCount', `${pending.length} pending request(s)`);
         renderRequests();
         document.getElementById('owner-requests').style.display = 'block';
-      } catch (_) {}
+      } catch (err) {
+        text('#requestCount', `pending requests unavailable: ${err}`);
+      }
     }
 
     function renderRequests() {
@@ -1053,26 +1058,34 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         if (!approved || approved <= 0) { text('#requestsList', 'Approved views must be positive'); return; }
         const passInput = document.getElementById(`pass-${idx}`);
         const passphrase = (passInput?.value || '').trim();
-        const base = await peerBaseByUser(currentUser, { allowOffline: true });
-        const url = `${base}/approve-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
-        await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requester: req.viewer, views: approved, passphrase }),
-        });
-        await refreshOwnerRequests();
+        try {
+          const base = await peerBaseByUser(currentUser, { allowOffline: true });
+          const url = `${base}/approve-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requester: req.viewer, views: approved, passphrase }),
+          });
+          await refreshOwnerRequests();
+        } catch (err) {
+          text('#requestsList', `approve failed: ${err}`);
+        }
       } else if (btn.classList.contains('reject-btn')) {
         const idx = parseInt(btn.dataset.idx || '-1', 10);
         const req = pendingCache[idx];
         if (!req) return;
-        const base = await peerBaseByUser(currentUser, { allowOffline: true });
-        const url = `${base}/reject-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
-        await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requester: req.viewer, views: 0 }),
-        });
-        await refreshOwnerRequests();
+        try {
+          const base = await peerBaseByUser(currentUser, { allowOffline: true });
+          const url = `${base}/reject-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requester: req.viewer, views: 0 }),
+          });
+          await refreshOwnerRequests();
+        } catch (err) {
+          text('#requestsList', `reject failed: ${err}`);
+        }
       }
     });
 
