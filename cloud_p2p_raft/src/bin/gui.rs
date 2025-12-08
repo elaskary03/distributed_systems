@@ -289,7 +289,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     <div id="main-app" style="display:none;">
       <div style="display:flex; justify-content:flex-end; align-items:center; gap:12px; margin-bottom:8px;">
         <div id="sessionLabel" class="pill">Logged in as: -</div>
-        <button id="offlineBtn" class="btn-warn">Go Offline</button>
       </div>
 
       <!-- Top row: Upload (spans wider) + Leader -->
@@ -429,17 +428,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     </div>
   </div>
 
-  <!-- Offline overlay -->
-  <div id="offlineOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); backdrop-filter: blur(2px); align-items:center; justify-content:center; z-index:1200; padding:20px;">
-    <div style="background:#fff; border-radius:12px; padding:18px; max-width:420px; width:100%; box-shadow:0 20px 50px rgba(0,0,0,.35); display:flex; flex-direction:column; gap:10px; text-align:center;">
-      <h3 style="margin:0;">You are offline</h3>
-      <p style="margin:0; color:#6b7280;">Presence disconnected. Go online to continue sharing and receiving updates.</p>
-      <div class="btns" style="justify-content:center;">
-        <button id="goOnlineBtn" class="btn-accent">Go Online</button>
-      </div>
-    </div>
-  </div>
-
   <script>
     const $ = sel => document.querySelector(sel);
     const text = (id, s) => { const el = $(id); if (el) el.textContent = s; };
@@ -457,13 +445,13 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let presenceWs = null;
     let currentUser = "";
     let cachedUsersList = "";
-    let manualLogout = false;
+    let manualLogout = false; // retained for ws close handling
     let pendingNewCache = [];
     let pendingMoreCache = [];
     let pendingSentNewCache = [];
     let pendingSentMoreCache = [];
     let activeRequestTab = 'received';
-    let offlineUser = "";
+    let sentHistory = new Map();
     let activeViewer = null;
     let lastViewedContext = null;
     const launchStatus = (msg) => { text('#loginOut', msg); document.getElementById('loginOut').style.display = 'block'; };
@@ -486,42 +474,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     }
     window.addEventListener('beforeunload', sendOfflineBeacon);
     window.addEventListener('pagehide', sendOfflineBeacon);
-
-    async function goOffline() {
-      if (!currentUser) return;
-      const payload = JSON.stringify({ user: currentUser });
-
-      // Try to mark offline over the live WS channel first for immediate broadcast
-      let signalled = false;
-      if (presenceWs && presenceWs.readyState === WebSocket.OPEN) {
-        try { presenceWs.send(`UNREGISTER ${currentUser}`); signalled = true; } catch (_) {}
-      }
-
-      // Fallback to HTTP bridge so peers still see us as offline
-      if (!signalled) {
-        try {
-          await fetch('/api/unregister', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: payload
-          });
-        } catch (_) {}
-      }
-
-      offlineUser = currentUser;
-      cachedUsersList = "";
-      manualLogout = true;
-      if (presenceWs) { try { presenceWs.close(); } catch (_) {} presenceWs = null; }
-      const main = document.getElementById('main-app');
-      if (main) { main.classList.add('blurred'); }
-      const overlay = document.getElementById('offlineOverlay');
-      if (overlay) { overlay.style.display = 'flex'; }
-      document.getElementById('sessionLabel').textContent = `Logged in as: ${offlineUser} (offline)`;
-
-      // Refresh cached user list so we render as offline immediately without touching image data
-      try { cachedUsersList = await (await fetch('/api/users')).text(); } catch (_) {}
-      try { await refreshPeerList(); } catch (_) {}
-    }
 
     async function startLocalClient(user, port = DEFAULT_P2P_PORT) {
       try {
@@ -841,6 +793,11 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       return parseUsers(body).filter(u => u.online && !!u.ip);
     }
 
+    async function getAllPeers() {
+      const body = await ensureUsersList();
+      return parseUsers(body);
+    }
+
     function formatLastSeen(ns = 0) {
       if (!ns) return 'unknown';
       const ms = ns / 1_000_000;
@@ -871,28 +828,37 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const res = await fetch('/api/images');
         if (!res.ok) return [];
         const data = await res.json();
-        let users = Array.isArray(data.users) ? data.users : [];
-        if (!users.length) {
-          // Fallback: build minimal entries from SHOW_USERS so offline users still render
-          try {
-            const raw = await (await fetch('/api/users')).text();
-            users = parseUsers(raw).map(u => ({
-              user: u.user,
-              username: u.user,
-              online: u.online,
-              ip: u.ip,
-              p2p_port: u.port,
-              last_seen: u.last_seen || 0,
-              images: [],
-            }));
-          } catch (_) {}
+        const users = Array.isArray(data.users) ? data.users : [];
+        const fromUsersApi = [];
+        try {
+          const raw = await (await fetch('/api/users')).text();
+          fromUsersApi.push(...parseUsers(raw));
+        } catch (_) {}
+        const map = new Map();
+        for (const u of users) {
+          const key = u.user || u.username || '';
+          if (!key) continue;
+          map.set(key, { ...u, user: key, username: key });
         }
-        return users;
+        for (const u of fromUsersApi) {
+          const key = u.user;
+          if (!key || map.has(key)) continue;
+          map.set(key, {
+            user: key,
+            username: key,
+            online: u.online,
+            ip: u.ip,
+            p2p_port: u.port,
+            last_seen: u.last_seen || 0,
+            images: [],
+          });
+        }
+        return Array.from(map.values());
       } catch (_) { return []; }
     }
 
     async function fetchLiveImages() {
-      const peers = await getOnlinePeers();
+      const peers = await getAllPeers();
       const results = [];
       for (const peer of peers) {
         const owner = peer.user;
@@ -905,7 +871,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           results.push({
             user: owner,
             username: owner,
-            online: true,
+            online: peer.online,
             ip: peer.ip,
             p2p_port: peer.port,
             last_seen: peer.last_seen || 0,
@@ -1002,20 +968,63 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
               if (req.viewer !== currentUser) continue;
               const existing = typeof perms[currentUser] === 'number' ? perms[currentUser] : 0;
               const bucket = existing > 0 ? pendingMore : pendingNew;
+              let status = 'pending';
+              if (existing > 0) {
+                const remaining = img.remaining_views_for_requester !== undefined
+                  ? img.remaining_views_for_requester
+                  : existing;
+                status = `approved (${remaining} remaining)`;
+              }
+              sentHistory.set(`${imgOwner}::${img.id}`, { owner: imgOwner, image: img.id, requested: req.requested_views, status });
               bucket.push({
                 owner: imgOwner,
                 image: img.id,
                 requested: req.requested_views,
                 existing,
                 viewer: currentUser,
+                status,
+              });
+            }
+            // If we have an approved permission but no pending entry, still surface it
+            const hasPermission = typeof perms[currentUser] === 'number' && perms[currentUser] > 0;
+            const hasPending = Array.isArray(img.pending_requests) && img.pending_requests.some(r => r.viewer === currentUser);
+            if (hasPermission && !hasPending) {
+              const remaining = img.remaining_views_for_requester !== undefined
+                ? img.remaining_views_for_requester
+                : perms[currentUser];
+              sentHistory.set(`${imgOwner}::${img.id}`, { owner: imgOwner, image: img.id, requested: remaining, status: `approved (${remaining} remaining)` });
+              pendingMore.push({
+                owner: imgOwner,
+                image: img.id,
+                requested: remaining,
+                existing: perms[currentUser],
+                viewer: currentUser,
+                status: `approved (${remaining} remaining)`,
               });
             }
           }
         }
         pendingSentNewCache = pendingNew;
         pendingSentMoreCache = pendingMore;
-        const total = pendingNew.length + pendingMore.length;
-        text('#sentRequestCount', `${total} pending (sent): ${pendingNew.length} new, ${pendingMore.length} more-views`);
+        const fetchedKeys = new Set([
+          ...pendingNew.map(r => `${r.owner}::${r.image}`),
+          ...pendingMore.map(r => `${r.owner}::${r.image}`),
+        ]);
+        for (const [key, val] of sentHistory.entries()) {
+          if (fetchedKeys.has(key)) {
+            continue;
+          }
+          pendingSentMoreCache.push({
+            owner: val.owner,
+            image: val.image,
+            requested: val.requested || 0,
+            existing: 0,
+            viewer: currentUser,
+            status: val.status || 'rejected or expired',
+          });
+        }
+        const totalSent = pendingSentNewCache.length + pendingSentMoreCache.length;
+        text('#sentRequestCount', `${totalSent} sent request(s): ${pendingSentNewCache.length} new, ${pendingSentMoreCache.length} more/other`);
         renderRequests('sent');
         document.getElementById('owner-requests').style.display = 'block';
       } catch (_) {}
@@ -1030,6 +1039,12 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       if (recBtn) recBtn.classList.toggle('btn-accent', activeRequestTab === 'received');
       if (sentBtn) sentBtn.classList.toggle('btn-accent', activeRequestTab === 'sent');
       renderRequests(activeRequestTab);
+    }
+
+    function rememberSentRequest(owner, image, requested) {
+      if (!owner || !image) return;
+      const key = `${owner}::${image}`;
+      sentHistory.set(key, { owner, image, requested, viewer: currentUser, status: 'pending' });
     }
 
     async function revokeAccess() {
@@ -1066,12 +1081,14 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         if (!list.length) return '<div class="hint">None</div>';
         return list.map((req, idx) => {
           const ownerLine = isSent ? `<div><strong>Owner:</strong> ${req.owner}</div>` : '';
+          const statusLine = isSent ? `<div><strong>Status:</strong> ${escapeHtml(req.status || 'pending')}</div>` : '';
           return `
           <div class="req" data-img="${req.image}" data-viewer="${req.viewer}" data-kind="${kind}" data-idx="${idx}">
             ${ownerLine}
             <div><strong>Image:</strong> ${req.image}</div>
             ${isSent ? '' : `<div><strong>Viewer:</strong> ${req.viewer}</div>`}
             <div><strong>Requested:</strong> ${req.requested}${req.existing ? ` (already had ${req.existing})` : ''}</div>
+            ${statusLine}
             ${isSent ? '' : `
               <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
                 <input type="number" id="${kind}-approve-${idx}" value="${req.requested}" min="1" style="width:90px;">
@@ -1260,6 +1277,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         });
         const txt = await res.text();
         text('#peerOut', txt);
+        rememberSentRequest(owner, imgId, views);
         await refreshOwnerRequests();
         await refreshSentRequests();
       } catch (err) { text('#peerOut', String(err)); }
@@ -1283,6 +1301,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         });
         const txt = await res.text();
         text('#peerOut', txt);
+        rememberSentRequest(owner, imgId, views);
         await refreshOwnerRequests();
         await refreshSentRequests();
       } catch (err) { text('#peerOut', String(err)); }
@@ -1324,28 +1343,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const body = await res.text();
         text('#launchOut', body);
       } catch (err) { text('#launchOut', String(err)); }
-    });
-
-    /* Go Offline */
-    $('#offlineBtn').addEventListener('click', goOffline);
-
-    $('#goOnlineBtn').addEventListener('click', async () => {
-      const user = offlineUser || currentUser;
-      if (!user) { showMainUI(false); return; }
-      currentUser = user;
-      cachedUsersList = "";
-      manualLogout = false;
-      const main = document.getElementById('main-app');
-      if (main) { main.classList.remove('blurred'); }
-      const overlay = document.getElementById('offlineOverlay');
-      if (overlay) { overlay.style.display = 'none'; }
-      document.getElementById('sessionLabel').textContent = `Logged in as: ${currentUser} (online)`;
-      offlineUser = "";
-      connectPresence();
-      await refreshOwnerRequests();
-      await refreshSentRequests();
-      setRequestTab('received');
-      await refreshPeerList();
     });
 
     // Default tab state
