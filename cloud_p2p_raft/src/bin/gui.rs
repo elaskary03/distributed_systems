@@ -402,7 +402,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             </div>
             <div>
               <label>Port</label>
-              <input id="launchPort" type="number" value="10002" min="1">
+              <input id="launchPort" type="number" value="10000" min="1">
             </div>
           </div>
           <div class="btns" style="margin-top:8px">
@@ -443,7 +443,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
     const WS_URL = "{{WS_URL}}";
-    const LAUNCH_PORT_DEFAULT = 10002;
+    const LAUNCH_PORT_DEFAULT = 10000;
     const CLIENT_P2P_PORT = 10000;
     const UI_HOST = (window.location && window.location.hostname) ? window.location.hostname : '127.0.0.1';
     let presenceWs = null;
@@ -453,7 +453,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let pendingCache = [];
     let activeViewer = null;
     let lastViewedContext = null;
-    let localLaunchStarted = false;
+    let lastLaunchedUser = null;
     const launchStatus = (msg) => { text('#loginOut', msg); document.getElementById('loginOut').style.display = 'block'; };
 
     function sendOfflineBeacon() {
@@ -476,7 +476,17 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     window.addEventListener('pagehide', sendOfflineBeacon);
 
     async function startLocalClient(user, port = CLIENT_P2P_PORT) {
+      if (!user) return;
       try {
+        if (lastLaunchedUser && lastLaunchedUser !== user) {
+          try {
+            await fetch('/api/launcher/stop', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ user: lastLaunchedUser })
+            });
+          } catch (_) {}
+        }
         const res = await fetch('/api/launcher/launch', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -484,6 +494,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         });
         const body = await res.text();
         launchStatus(body);
+        if (res.ok) {
+          lastLaunchedUser = user;
+        }
       } catch (err) {
         launchStatus('launcher error: ' + err);
       }
@@ -656,10 +669,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       showMainUI(true);
       document.getElementById('loginOut').style.display = 'none';
       clearOutputs();
-      if (!localLaunchStarted) {
-        localLaunchStarted = true;
-        startLocalClient(user).catch(() => {});
-      }
+      const launchPort = parseInt($('#launchPort').value || `${LAUNCH_PORT_DEFAULT}`, 10);
+      startLocalClient(user, Number.isFinite(launchPort) && launchPort > 0 ? launchPort : CLIENT_P2P_PORT).catch(() => {});
       connectPresence();
       try {
         const list = await (await fetch('/api/users')).text();
@@ -1125,6 +1136,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         });
         const body = await res.text();
         text('#launchOut', body);
+        if (res.ok) {
+          lastLaunchedUser = user;
+        }
       } catch (err) { text('#launchOut', String(err)); }
     });
 
@@ -1139,6 +1153,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         });
         const body = await res.text();
         text('#launchOut', body);
+        if (user === lastLaunchedUser) {
+          lastLaunchedUser = null;
+        }
       } catch (err) { text('#launchOut', String(err)); }
     });
 
@@ -1160,9 +1177,19 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           body: JSON.stringify({ user: currentUser })
         });
       } catch (_) {}
+      if (lastLaunchedUser) {
+        try {
+          await fetch('/api/launcher/stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user: lastLaunchedUser })
+          });
+        } catch (_) {}
+      }
       currentUser = "";
       cachedUsersList = "";
       manualLogout = true;
+      lastLaunchedUser = null;
       if (presenceWs) { try { presenceWs.close(); } catch (_) {} presenceWs = null; }
       clearOutputs();
       showMainUI(false);

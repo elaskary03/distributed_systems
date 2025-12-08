@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use clap::Parser;
 use cloud_p2p_raft::crypto::{embed_lsb_rgba, encrypt_bytes, pack_embed_blob, sha256_hex};
-use futures::{SinkExt, StreamExt};
+use futures::{future::join_all, SinkExt, StreamExt};
 use gcp_auth::AuthenticationManager;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -1826,6 +1826,23 @@ impl NetNode {
                         }
                         continue;
                     }
+
+                    let targets: Vec<(String, String, u16)> = {
+                        let users = self.registered_users.read().await;
+                        users
+                            .values()
+                            .map(|u| (u.username.clone(), u.ip.clone(), u.p2p_port))
+                            .collect()
+                    };
+
+                    let node = self.clone();
+                    join_all(targets.into_iter().map(|(user, ip, port)| {
+                        let node = node.clone();
+                        async move {
+                            node.sync_user_metadata(&user, &ip, port).await;
+                        }
+                    }))
+                    .await;
 
                     let users = self.registered_users.read().await;
                     let metadata = self.image_metadata.read().await;
