@@ -533,7 +533,7 @@ async fn view_update(
     meta.last_update_ns = now_nanos();
     ensure_owner_default_perm(&mut meta);
     let _ = save_metadata(&paths.meta, &image_id, &meta).await;
-    Json(json!({"status":"ok","permissions": meta.permissions}))
+    Json(json!({"status":"ok","permissions": meta.permissions})).into_response()
 }
 
 async fn update_permissions(
@@ -564,7 +564,7 @@ async fn update_permissions(
     ensure_owner_default_perm(&mut meta);
     let _ = save_metadata(&paths.meta, &image_id, &meta).await;
     let _ = replay_pending(&paths.meta, &image_id).await;
-    Json(json!({"status":"ok","permissions": meta.permissions}))
+    Json(json!({"status":"ok","permissions": meta.permissions})).into_response()
 }
 
 async fn revoke_access(
@@ -597,6 +597,7 @@ async fn revoke_access(
     Json(
         json!({"status":"revoked","target_user": body.target_user,"permissions": meta.permissions}),
     )
+    .into_response()
 }
 
 async fn find_owner_paths(base: &PathBuf, image_id: &str) -> Option<OwnerPaths> {
@@ -808,7 +809,7 @@ fn now_nanos() -> u128 {
 }
 
 fn default_metadata(owner: &str, base: Option<HashMap<String, i64>>) -> Metadata {
-    let mut permissions = base.unwrap_or_default();
+    let permissions = base.unwrap_or_default();
     Metadata {
         owner: owner.to_string(),
         permissions,
