@@ -655,6 +655,39 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       if (!$('#launchPort').value) { $('#launchPort').value = LAUNCH_PORT_DEFAULT; }
     }
 
+    async function uploadToOwnerP2P(fdUpload, imageId) {
+      const tried = [];
+      // 1) try to resolve via SHOW_USERS/peers
+      try {
+        const ownerBase = await peerBaseByUser(currentUser, { allowOffline: true });
+        tried.push(ownerBase);
+        const res = await fetch(`${ownerBase}/upload-image`, { method: 'POST', body: fdUpload });
+        if (res.ok) return;
+        const body = await res.text().catch(() => '');
+        throw new Error(`status ${res.status} ${body}`);
+      } catch (e) {
+        console.warn('upload via peerBase failed', e);
+      }
+
+      // 2) fallbacks to localhost variants (useful when registration metadata lags)
+      const fallbacks = [
+        `http://127.0.0.1:${CLIENT_P2P_PORT}`,
+        `http://${UI_HOST}:${CLIENT_P2P_PORT}`,
+      ].filter(b => !tried.includes(b));
+      let lastErr = null;
+      for (const base of fallbacks) {
+        try {
+          const res = await fetch(`${base}/upload-image`, { method: 'POST', body: fdUpload });
+          if (res.ok) return;
+          const body = await res.text().catch(() => '');
+          lastErr = new Error(`status ${res.status} ${body}`);
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      throw lastErr || new Error(`P2P upload failed for ${imageId}`);
+    }
+
     async function performLogin(auto = false) {
       const user = ($('#loginUser').value || '').trim();
       if (!user) {
@@ -723,10 +756,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
               fdUpload.append('preview', new File([previewBlob], `preview-${fileBase}`, { type: 'image/png' }));
             }
 
-            // For owner uploads, push directly to the owner's peer endpoint
-            const ownerBase = await peerBaseByUser(currentUser, { allowOffline: true });
-            const p2pUrl = `${ownerBase}/upload-image`;
-            await fetch(p2pUrl, { method: 'POST', body: fdUpload });
+            // For owner uploads, push directly to the owner's peer endpoint (with fallbacks)
+            await uploadToOwnerP2P(fdUpload, imageId);
 
             // Download locally for user convenience
             const a = document.createElement('a');
