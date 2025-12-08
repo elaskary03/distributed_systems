@@ -90,6 +90,11 @@ struct UpdatePermissionsReq {
     new_quota: i64,
 }
 
+#[derive(Deserialize)]
+struct RevokeAccessReq {
+    target_user: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -112,6 +117,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/update-permissions/:owner/:image_id",
             post(update_permissions),
+        )
+        .route(
+            "/revoke-access/:owner/:image_id",
+            post(revoke_access),
         )
         .with_state(state)
         .layer(
@@ -532,15 +541,62 @@ async fn update_permissions(
     AxumPath((owner, image_id)): AxumPath<(String, String)>,
     Json(body): Json<UpdatePermissionsReq>,
 ) -> impl IntoResponse {
+    if body.target_user.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "target_user required").into_response();
+    }
     let paths = resolve_owner_paths(&st.base, &owner, &image_id).await;
+    if load_image(&paths.encrypted, &image_id).await.is_err() {
+        return (StatusCode::NOT_FOUND, "image not found").into_response();
+    }
     let mut meta = load_metadata(&paths.meta, &image_id)
         .await
         .unwrap_or_else(|_| default_metadata(&owner, None));
-    meta.permissions.insert(body.target_user, body.new_quota);
+    if meta.owner != owner {
+        return (StatusCode::FORBIDDEN, "not owner").into_response();
+    }
+
+    meta.permissions
+        .insert(body.target_user.clone(), body.new_quota);
+    if body.new_quota <= 0 {
+        meta.shared_passphrases.remove(&body.target_user);
+    }
     meta.last_update_ns = now_nanos();
     ensure_owner_default_perm(&mut meta);
     let _ = save_metadata(&paths.meta, &image_id, &meta).await;
+    let _ = replay_pending(&paths.meta, &image_id).await;
     Json(json!({"status":"ok","permissions": meta.permissions}))
+}
+
+async fn revoke_access(
+    State(st): State<AppState>,
+    AxumPath((owner, image_id)): AxumPath<(String, String)>,
+    Json(body): Json<RevokeAccessReq>,
+) -> impl IntoResponse {
+    if body.target_user.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "target_user required").into_response();
+    }
+
+    let paths = resolve_owner_paths(&st.base, &owner, &image_id).await;
+    if load_image(&paths.encrypted, &image_id).await.is_err() {
+        return (StatusCode::NOT_FOUND, "image not found").into_response();
+    }
+    let mut meta = load_metadata(&paths.meta, &image_id)
+        .await
+        .unwrap_or_else(|_| default_metadata(&owner, None));
+    if meta.owner != owner {
+        return (StatusCode::FORBIDDEN, "not owner").into_response();
+    }
+
+    meta.permissions.remove(&body.target_user);
+    meta.shared_passphrases.remove(&body.target_user);
+    meta.last_update_ns = now_nanos();
+    ensure_owner_default_perm(&mut meta);
+    let _ = save_metadata(&paths.meta, &image_id, &meta).await;
+    let _ = replay_pending(&paths.meta, &image_id).await;
+
+    Json(
+        json!({"status":"revoked","target_user": body.target_user,"permissions": meta.permissions}),
+    )
 }
 
 async fn find_owner_paths(base: &PathBuf, image_id: &str) -> Option<OwnerPaths> {
