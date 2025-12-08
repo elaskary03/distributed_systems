@@ -374,8 +374,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             <button id="peerPreviewBtn">PREVIEW</button>
             <button id="peerFullBtn">FULL</button>
             <button id="peerRequestBtn">REQUEST_IMAGE</button>
+            <button id="peerRequestMoreBtn" class="btn-accent">REQUEST_MORE_VIEWS</button>
           </div>
-          <div class="hint">FULL will fetch & decrypt for a single in-browser view. Close the viewer to consume one view and refresh quotas.</div>
+          <div class="hint">FULL will fetch & decrypt for a single in-browser view. Close the viewer to consume one view and refresh quotas. Use REQUEST_IMAGE/REQUEST_MORE_VIEWS to ask for initial or additional view quotas from the owner.</div>
           <div id="peerOut" class="out"></div>
           <div style="margin-top:8px">
             <img id="peerImg" style="max-width:100%; display:none; border:1px solid var(--border); border-radius:8px;" />
@@ -405,29 +406,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         </section>
       </div>
 
-      <!-- Fourth row: Local client launcher -->
-      <div class="grid">
-        <section>
-          <h2>🧭 Local Clients (launcher)</h2>
-          <div class="row">
-            <div>
-              <label>Username</label>
-              <input id="launchUser" type="text" placeholder="alice">
-            </div>
-            <div>
-              <label>Port</label>
-              <input id="launchPort" type="number" value="10002" min="1">
-            </div>
-          </div>
-          <div class="btns" style="margin-top:8px">
-            <button id="launchBtn" class="btn-accent">LAUNCH</button>
-            <button id="stopBtn" class="btn-warn">STOP</button>
-            <button id="listLaunchBtn">LIST</button>
-          </div>
-          <div id="launchOut" class="out"></div>
-          <div class="hint">Starts/stops local <span class="pill">client_p2p</span> processes from this GUI host. Logs under <span class="pill">~/.cloudp2p/launcher/</span>.</div>
-        </section>
-      </div>
     </div>
   </div>
 
@@ -1106,7 +1084,30 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ requester: currentUser, views }),
         });
-        text('#peerOut', await res.text());
+        const txt = await res.text();
+        text('#peerOut', txt);
+        await refreshOwnerRequests();
+      } catch (err) { text('#peerOut', String(err)); }
+    });
+
+    $('#peerRequestMoreBtn').addEventListener('click', async () => {
+      const peer = ($('#peerUser').value || '').trim();
+      const imgId = ($('#peerImageId').value || '').trim();
+      const views = parseInt($('#peerViews').value || '0', 10);
+      if (!peer || !imgId || !currentUser) { text('#peerOut', 'peer, image_id, and login required'); return; }
+      if (views <= 0) { text('#peerOut', 'views must be positive'); return; }
+      try {
+        const info = await resolvePeer(peer, { allowOffline: true });
+        if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
+        const owner = info.user || peer;
+        const url = `${P2P_BASE}/request-image/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requester: currentUser, views }),
+        });
+        const txt = await res.text();
+        text('#peerOut', txt);
         await refreshOwnerRequests();
       } catch (err) { text('#peerOut', String(err)); }
     });

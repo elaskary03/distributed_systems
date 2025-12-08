@@ -376,20 +376,20 @@ async fn request_image(
         return (StatusCode::NOT_FOUND, "image not found").into_response();
     }
 
-    match load_metadata(&paths.meta, &image_id).await {
-        Ok(meta) => {
-            if meta.permissions.get(&body.requester).copied().unwrap_or(0) > 0 {
-                return (StatusCode::BAD_REQUEST, "already has quota").into_response();
-            }
-        }
-        Err(_) => {}
-    }
-
     let mut pending = load_pending_requests(&paths.meta, &image_id)
         .await
         .unwrap_or_default();
-    if pending.iter().any(|r| r.viewer == body.requester) {
-        return Json(json!({"status":"pending"})).into_response();
+    if let Some(existing) = pending.iter_mut().find(|r| r.viewer == body.requester) {
+        existing.requested_views += body.views;
+        if let Err(e) = save_pending_requests(&paths.meta, &image_id, &pending).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("save pending: {e}"),
+            )
+                .into_response();
+        }
+        return Json(json!({"status":"pending","requested_views": existing.requested_views}))
+            .into_response();
     }
     pending.push(PendingRequest {
         viewer: body.requester.clone(),
