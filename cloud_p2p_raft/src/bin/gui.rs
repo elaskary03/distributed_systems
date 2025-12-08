@@ -379,25 +379,35 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       <div class="grid">
         <section id="owner-requests" style="display:none;">
           <h2>📬 Pending Requests (Owner)</h2>
-          <div class="btns" style="margin-bottom:8px">
-            <button id="listRequestsBtn">LIST_REQUESTS</button>
+          <div class="btns" style="margin-bottom:8px; gap:6px; flex-wrap:wrap;">
+            <button id="tabReceived" class="btn-accent">Received</button>
+            <button id="tabSent">Sent</button>
+            <button id="listRequestsBtn">REFRESH</button>
           </div>
           <div id="requestCount" class="hint"></div>
-          <div id="requestsList" class="out"></div>
-          <div class="row" style="margin-top:10px">
-            <div>
-              <label>Revoke: Image ID</label>
-              <input id="revokeImageId" type="text" placeholder="img-...">
+          <div id="sentRequestCount" class="hint"></div>
+
+          <div id="requestsReceivedPane">
+            <div id="requestsList" class="out"></div>
+            <div class="row" style="margin-top:10px">
+              <div>
+                <label>Revoke: Image ID</label>
+                <input id="revokeImageId" type="text" placeholder="img-...">
+              </div>
+              <div>
+                <label>Revoke: Target User</label>
+                <input id="revokeUser" type="text" placeholder="viewer username">
+              </div>
+              <div class="btns" style="margin-top:8px">
+                <button id="revokeBtn" class="btn-warn">REVOKE ACCESS</button>
+              </div>
             </div>
-            <div>
-              <label>Revoke: Target User</label>
-              <input id="revokeUser" type="text" placeholder="viewer username">
-            </div>
-            <div class="btns" style="margin-top:8px">
-              <button id="revokeBtn" class="btn-warn">REVOKE ACCESS</button>
-            </div>
+            <div id="revokeOut" class="out"></div>
           </div>
-          <div id="revokeOut" class="out"></div>
+
+          <div id="requestsSentPane" style="display:none;">
+            <div id="sentRequestsList" class="out"></div>
+          </div>
         </section>
       </div>
 
@@ -450,6 +460,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let manualLogout = false;
     let pendingNewCache = [];
     let pendingMoreCache = [];
+    let pendingSentNewCache = [];
+    let pendingSentMoreCache = [];
+    let activeRequestTab = 'received';
     let offlineUser = "";
     let activeViewer = null;
     let lastViewedContext = null;
@@ -473,6 +486,42 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     }
     window.addEventListener('beforeunload', sendOfflineBeacon);
     window.addEventListener('pagehide', sendOfflineBeacon);
+
+    async function goOffline() {
+      if (!currentUser) return;
+      const payload = JSON.stringify({ user: currentUser });
+
+      // Try to mark offline over the live WS channel first for immediate broadcast
+      let signalled = false;
+      if (presenceWs && presenceWs.readyState === WebSocket.OPEN) {
+        try { presenceWs.send(`UNREGISTER ${currentUser}`); signalled = true; } catch (_) {}
+      }
+
+      // Fallback to HTTP bridge so peers still see us as offline
+      if (!signalled) {
+        try {
+          await fetch('/api/unregister', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload
+          });
+        } catch (_) {}
+      }
+
+      offlineUser = currentUser;
+      cachedUsersList = "";
+      manualLogout = true;
+      if (presenceWs) { try { presenceWs.close(); } catch (_) {} presenceWs = null; }
+      const main = document.getElementById('main-app');
+      if (main) { main.classList.add('blurred'); }
+      const overlay = document.getElementById('offlineOverlay');
+      if (overlay) { overlay.style.display = 'flex'; }
+      document.getElementById('sessionLabel').textContent = `Logged in as: ${offlineUser} (offline)`;
+
+      // Refresh cached user list so we render as offline immediately without touching image data
+      try { cachedUsersList = await (await fetch('/api/users')).text(); } catch (_) {}
+      try { await refreshPeerList(); } catch (_) {}
+    }
 
     async function startLocalClient(user, port = DEFAULT_P2P_PORT) {
       try {
@@ -675,6 +724,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         cachedUsersList = list;
       } catch (_) {}
       await refreshOwnerRequests();
+      await refreshSentRequests();
+      setRequestTab('received');
     });
 
     /* Upload & ENCRYPT_ON_CLOUD */
@@ -925,9 +976,60 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         pendingMoreCache = pendingMore;
         const total = pendingNew.length + pendingMore.length;
         text('#requestCount', `${total} pending request(s): ${pendingNew.length} new, ${pendingMore.length} more-views`);
-        renderRequests();
+        renderRequests('received');
         document.getElementById('owner-requests').style.display = 'block';
       } catch (_) {}
+    }
+
+    async function refreshSentRequests() {
+      if (!currentUser) { return; }
+      try {
+        const [cached, live] = await Promise.all([
+          fetchCachedImages(),
+          fetchLiveImages().catch(() => []),
+        ]);
+        const merged = mergeUsers(cached, live);
+        const pendingNew = [];
+        const pendingMore = [];
+        for (const user of merged) {
+          const owner = user.user || user.username || '';
+          for (const img of user.images || []) {
+            const imgOwner = img.owner || owner;
+            if (!imgOwner || imgOwner === currentUser) continue;
+            if (!Array.isArray(img.pending_requests)) continue;
+            const perms = (img.permissions && typeof img.permissions === 'object') ? img.permissions : {};
+            for (const req of img.pending_requests) {
+              if (req.viewer !== currentUser) continue;
+              const existing = typeof perms[currentUser] === 'number' ? perms[currentUser] : 0;
+              const bucket = existing > 0 ? pendingMore : pendingNew;
+              bucket.push({
+                owner: imgOwner,
+                image: img.id,
+                requested: req.requested_views,
+                existing,
+                viewer: currentUser,
+              });
+            }
+          }
+        }
+        pendingSentNewCache = pendingNew;
+        pendingSentMoreCache = pendingMore;
+        const total = pendingNew.length + pendingMore.length;
+        text('#sentRequestCount', `${total} pending (sent): ${pendingNew.length} new, ${pendingMore.length} more-views`);
+        renderRequests('sent');
+        document.getElementById('owner-requests').style.display = 'block';
+      } catch (_) {}
+    }
+
+    function setRequestTab(tab) {
+      activeRequestTab = tab === 'sent' ? 'sent' : 'received';
+      document.getElementById('requestsReceivedPane').style.display = activeRequestTab === 'received' ? 'block' : 'none';
+      document.getElementById('requestsSentPane').style.display = activeRequestTab === 'sent' ? 'block' : 'none';
+      const recBtn = document.getElementById('tabReceived');
+      const sentBtn = document.getElementById('tabSent');
+      if (recBtn) recBtn.classList.toggle('btn-accent', activeRequestTab === 'received');
+      if (sentBtn) sentBtn.classList.toggle('btn-accent', activeRequestTab === 'sent');
+      renderRequests(activeRequestTab);
     }
 
     async function revokeAccess() {
@@ -954,27 +1056,34 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       }
     }
 
-    function renderRequests() {
-      const container = document.getElementById('requestsList');
+    function renderRequests(mode = 'received') {
+      const isSent = mode === 'sent';
+      const container = isSent ? document.getElementById('sentRequestsList') : document.getElementById('requestsList');
+      const pendingNew = isSent ? pendingSentNewCache : pendingNewCache;
+      const pendingMore = isSent ? pendingSentMoreCache : pendingMoreCache;
+      if (!container) return;
       const renderGroup = (list, kind) => {
         if (!list.length) return '<div class="hint">None</div>';
         return list.map((req, idx) => {
+          const ownerLine = isSent ? `<div><strong>Owner:</strong> ${req.owner}</div>` : '';
           return `
           <div class="req" data-img="${req.image}" data-viewer="${req.viewer}" data-kind="${kind}" data-idx="${idx}">
+            ${ownerLine}
             <div><strong>Image:</strong> ${req.image}</div>
-            <div><strong>Viewer:</strong> ${req.viewer}</div>
+            ${isSent ? '' : `<div><strong>Viewer:</strong> ${req.viewer}</div>`}
             <div><strong>Requested:</strong> ${req.requested}${req.existing ? ` (already had ${req.existing})` : ''}</div>
-            <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
-              <input type="number" id="${kind}-approve-${idx}" value="${req.requested}" min="1" style="width:90px;">
-              <input type="text" id="${kind}-pass-${idx}" placeholder="passphrase (optional)" style="width:180px;">
-              <button class="approve-btn" data-kind="${kind}" data-idx="${idx}">Approve</button>
-              <button class="reject-btn" data-kind="${kind}" data-idx="${idx}">Reject</button>
-            </div>
+            ${isSent ? '' : `
+              <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
+                <input type="number" id="${kind}-approve-${idx}" value="${req.requested}" min="1" style="width:90px;">
+                <input type="text" id="${kind}-pass-${idx}" placeholder="passphrase (optional)" style="width:180px;">
+                <button class="approve-btn" data-kind="${kind}" data-idx="${idx}">Approve</button>
+                <button class="reject-btn" data-kind="${kind}" data-idx="${idx}">Reject</button>
+              </div>`}
           </div>`;
         }).join('\n');
       };
 
-      const any = pendingNewCache.length + pendingMoreCache.length;
+      const any = pendingNew.length + pendingMore.length;
       if (!any) {
         container.textContent = 'No pending requests';
         return;
@@ -982,11 +1091,11 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       container.innerHTML = `
         <div style="margin-bottom:10px;">
           <h4>New access requests</h4>
-          ${renderGroup(pendingNewCache, 'new')}
+          ${renderGroup(pendingNew, 'new')}
         </div>
         <div>
           <h4>More views requests</h4>
-          ${renderGroup(pendingMoreCache, 'more')}
+          ${renderGroup(pendingMore, 'more')}
         </div>
       `;
     }
@@ -1085,7 +1194,12 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
     $('#listRequestsBtn').addEventListener('click', async () => {
       await refreshOwnerRequests();
+      await refreshSentRequests();
+      setRequestTab(activeRequestTab);
     });
+
+    $('#tabReceived').addEventListener('click', () => setRequestTab('received'));
+    $('#tabSent').addEventListener('click', () => setRequestTab('sent'));
 
     $('#revokeBtn').addEventListener('click', async () => {
       await revokeAccess();
@@ -1147,6 +1261,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const txt = await res.text();
         text('#peerOut', txt);
         await refreshOwnerRequests();
+        await refreshSentRequests();
       } catch (err) { text('#peerOut', String(err)); }
     });
 
@@ -1169,6 +1284,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const txt = await res.text();
         text('#peerOut', txt);
         await refreshOwnerRequests();
+        await refreshSentRequests();
       } catch (err) { text('#peerOut', String(err)); }
     });
 
@@ -1211,25 +1327,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     });
 
     /* Go Offline */
-    $('#offlineBtn').addEventListener('click', async () => {
-      if (!currentUser) { return; }
-      try {
-        await fetch('/api/unregister', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user: currentUser })
-        });
-      } catch (_) {}
-      offlineUser = currentUser;
-      cachedUsersList = "";
-      manualLogout = true;
-      if (presenceWs) { try { presenceWs.close(); } catch (_) {} presenceWs = null; }
-      const main = document.getElementById('main-app');
-      if (main) { main.classList.add('blurred'); }
-      const overlay = document.getElementById('offlineOverlay');
-      if (overlay) { overlay.style.display = 'flex'; }
-      document.getElementById('sessionLabel').textContent = `Logged in as: ${offlineUser} (offline)`;
-    });
+    $('#offlineBtn').addEventListener('click', goOffline);
 
     $('#goOnlineBtn').addEventListener('click', async () => {
       const user = offlineUser || currentUser;
@@ -1245,8 +1343,13 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       offlineUser = "";
       connectPresence();
       await refreshOwnerRequests();
+      await refreshSentRequests();
+      setRequestTab('received');
       await refreshPeerList();
     });
+
+    // Default tab state
+    setRequestTab('received');
 
   </script>
 </body>
