@@ -638,13 +638,19 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     }
 
     // Ask the server to locate the stego file path for this image_id
-    async function pollFindStego(imageId, timeoutMs = 15000) {
+    async function pollFindStego(imageId, timeoutMs = 30000) {
       const start = Date.now();
       while (Date.now() - start < timeoutMs) {
         const res = await fetch('/api/find-stego?image_id=' + encodeURIComponent(imageId));
         if (res.ok) {
           const json = await res.json();
           return json.stego_path; // /files/uploads/<..> or /files/stego/<..>
+        }
+        // second attempt also checks uploads as a fallback
+        const res2 = await fetch('/api/find-stego?include_uploads=1&image_id=' + encodeURIComponent(imageId));
+        if (res2.ok) {
+          const json = await res2.json();
+          return json.stego_path;
         }
         await new Promise(r => setTimeout(r, 600));
       }
@@ -1430,17 +1436,26 @@ async fn api_find_stego(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    // Helper to scan a directory and return a served path prefix
+    // Helper to scan a directory (recursively) and return a served path prefix
     async fn scan_dir_for_id(dir: &PathBuf, web_prefix: &str, image_id: &str) -> Option<String> {
-        if let Ok(mut rd) = tokio_fs::read_dir(dir).await {
+        let mut stack = vec![dir.clone()];
+        while let Some(path) = stack.pop() {
+            let mut rd = match tokio_fs::read_dir(&path).await {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
             while let Ok(Some(entry)) = rd.next_entry().await {
+                let file_type = match entry.file_type().await {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if file_type.is_dir() {
+                    stack.push(entry.path());
+                    continue;
+                }
                 let name = entry.file_name().to_string_lossy().to_string();
                 let lower = name.to_lowercase();
-                if lower.contains(&image_id.to_lowercase())
-                    && (lower.ends_with(".png")
-                        || lower.ends_with(".jpg")
-                        || lower.ends_with(".jpeg"))
-                {
+                if lower.contains(&image_id.to_lowercase()) {
                     return Some(format!("{}/{}", web_prefix, name));
                 }
             }

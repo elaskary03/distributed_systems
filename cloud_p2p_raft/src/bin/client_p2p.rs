@@ -30,6 +30,10 @@ struct Args {
     /// Port to listen on for P2P HTTP
     #[arg(long, default_value_t = 10000)]
     port: u16,
+
+    /// Base directory for user images (matches old central server layout)
+    #[arg(long, default_value = "user_images")]
+    data_dir: String,
 }
 
 #[derive(Clone)]
@@ -83,8 +87,15 @@ struct ConsumeViewReq {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let data_root = get_data_dir();
-    let base = data_root.join("p2p");
+    let base = {
+        let dir = args.data_dir.trim();
+        if dir.is_empty() {
+            get_data_dir().join("p2p")
+        } else {
+            PathBuf::from(dir)
+        }
+    };
+    tokio::fs::create_dir_all(&base).await?;
 
     let state = AppState {
         owner: args.user.clone(),
@@ -224,8 +235,8 @@ async fn list_images(
     let mut images = Vec::new();
     // Only list images belonging to this server's owner to avoid leaking other users' data
     let owner_dir = st.base.join(&st.owner);
-    let enc_dir = owner_dir.join("encrypted");
-    let meta_dir = owner_dir.join("meta");
+    let enc_dir = owner_dir.clone(); // encrypted stored directly under owner dir
+    let meta_dir = owner_dir.clone();
     if let Ok(mut rd) = fs::read_dir(&enc_dir).await {
         while let Ok(Some(entry)) = rd.next_entry().await {
             if entry.path().extension().and_then(|s| s.to_str()) != Some("png") {
@@ -240,6 +251,9 @@ async fn list_images(
                 Some(v) => v,
                 None => continue,
             };
+            if id.ends_with("_preview") {
+                continue;
+            }
             if let Ok(mut meta) = load_metadata(&meta_dir, &id).await {
                 if meta.owner.is_empty() {
                     meta.owner = st.owner.clone();
@@ -520,13 +534,13 @@ async fn find_owner_paths(base: &PathBuf, image_id: &str) -> Option<OwnerPaths> 
                 continue;
             }
             let owner_dir = entry.path();
-            let enc_dir = owner_dir.join("encrypted");
+            let enc_dir = owner_dir.clone();
             let candidate = enc_dir.join(format!("{}.png", image_id));
             if fs::metadata(&candidate).await.is_ok() {
                 return Some(OwnerPaths {
                     original: owner_dir.join("original"),
                     encrypted: enc_dir,
-                    meta: owner_dir.join("meta"),
+                    meta: owner_dir.clone(),
                 });
             }
         }
@@ -542,8 +556,8 @@ async fn resolve_owner_paths(base: &PathBuf, owner: &str, image_id: &str) -> Own
         .await
         .unwrap_or_else(|_| OwnerPaths {
             original: base.join(owner).join("original"),
-            encrypted: base.join(owner).join("encrypted"),
-            meta: base.join(owner).join("meta"),
+            encrypted: base.join(owner),
+            meta: base.join(owner),
         })
 }
 
@@ -804,8 +818,8 @@ fn get_data_dir() -> PathBuf {
 async fn ensure_owner_paths(base: &Path, owner: &str) -> Result<OwnerPaths, anyhow::Error> {
     let owner_dir = base.join(owner);
     let original = owner_dir.join("original");
-    let encrypted = owner_dir.join("encrypted");
-    let meta = owner_dir.join("meta");
+    let encrypted = owner_dir.clone();
+    let meta = owner_dir.clone();
     fs::create_dir_all(&original).await?;
     fs::create_dir_all(&encrypted).await?;
     fs::create_dir_all(meta.join("pending_updates")).await.ok();
