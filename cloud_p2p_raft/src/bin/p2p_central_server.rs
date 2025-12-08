@@ -376,11 +376,10 @@ async fn request_image(
         return (StatusCode::NOT_FOUND, "image not found").into_response();
     }
 
-    let mut pending = load_pending_requests(&paths.meta, &image_id)
-        .await
-        .unwrap_or_default();
-    if let Some(existing) = pending.iter_mut().find(|r| r.viewer == body.requester) {
-        existing.requested_views += body.views;
+    let mut pending = load_pending_requests(&paths.meta, &image_id).await.unwrap_or_default();
+    if let Some(idx) = pending.iter().position(|r| r.viewer == body.requester) {
+        pending[idx].requested_views += body.views;
+        let total = pending[idx].requested_views;
         if let Err(e) = save_pending_requests(&paths.meta, &image_id, &pending).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -388,8 +387,7 @@ async fn request_image(
             )
                 .into_response();
         }
-        return Json(json!({"status":"pending","requested_views": existing.requested_views}))
-            .into_response();
+        return Json(json!({"status":"pending","requested_views": total})).into_response();
     }
     pending.push(PendingRequest {
         viewer: body.requester.clone(),
