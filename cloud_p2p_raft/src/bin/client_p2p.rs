@@ -235,52 +235,54 @@ async fn list_images(
     let mut images = Vec::new();
     // Only list images belonging to this server's owner to avoid leaking other users' data
     let owner_dir = st.base.join(&st.owner);
-    let enc_dir = owner_dir.clone(); // encrypted stored directly under owner dir
     let meta_dir = owner_dir.clone();
-    if let Ok(mut rd) = fs::read_dir(&enc_dir).await {
-        while let Ok(Some(entry)) = rd.next_entry().await {
-            if entry.path().extension().and_then(|s| s.to_str()) != Some("png") {
-                continue;
-            }
-            let id = match entry
-                .path()
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-            {
-                Some(v) => v,
-                None => continue,
-            };
-            if id.ends_with("_preview") {
-                continue;
-            }
-            if let Ok(mut meta) = load_metadata(&meta_dir, &id).await {
-                if meta.owner.is_empty() {
-                    meta.owner = st.owner.clone();
+    let candidates = vec![owner_dir.clone(), owner_dir.join("encrypted")];
+    for enc_dir in candidates.into_iter().filter(|d| d.exists()) {
+        if let Ok(mut rd) = fs::read_dir(&enc_dir).await {
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                if entry.path().extension().and_then(|s| s.to_str()) != Some("png") {
+                    continue;
                 }
-                let remaining = requester
-                    .as_ref()
-                    .and_then(|r| meta.permissions.get(r))
-                    .copied()
-                    .unwrap_or(0);
-                let mut obj = json!({
-                    "id": id,
-                    "owner": meta.owner,
-                    "permissions": meta.permissions,
-                    "remaining_views_for_requester": remaining,
-                    "last_update_ns": meta.last_update_ns
-                });
-                if let Some(req) = requester.as_ref() {
-                    if let Some(pw) = meta.shared_passphrases.get(req) {
-                        obj["shared_passphrase"] = serde_json::Value::String(pw.clone());
+                let id = match entry
+                    .path()
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                {
+                    Some(v) => v,
+                    None => continue,
+                };
+                if id.ends_with("_preview") {
+                    continue;
+                }
+                if let Ok(mut meta) = load_metadata(&meta_dir, &id).await {
+                    if meta.owner.is_empty() {
+                        meta.owner = st.owner.clone();
                     }
-                }
-                if is_owner && meta.owner == st.owner {
-                    if let Ok(reqs) = load_pending_requests(&meta_dir, &id).await {
-                        obj["pending_requests"] = serde_json::to_value(reqs).unwrap_or(json!([]));
+                    let remaining = requester
+                        .as_ref()
+                        .and_then(|r| meta.permissions.get(r))
+                        .copied()
+                        .unwrap_or(0);
+                    let mut obj = json!({
+                        "id": id,
+                        "owner": meta.owner,
+                        "permissions": meta.permissions,
+                        "remaining_views_for_requester": remaining,
+                        "last_update_ns": meta.last_update_ns
+                    });
+                    if let Some(req) = requester.as_ref() {
+                        if let Some(pw) = meta.shared_passphrases.get(req) {
+                            obj["shared_passphrase"] = serde_json::Value::String(pw.clone());
+                        }
                     }
+                    if is_owner && meta.owner == st.owner {
+                        if let Ok(reqs) = load_pending_requests(&meta_dir, &id).await {
+                            obj["pending_requests"] = serde_json::to_value(reqs).unwrap_or(json!([]));
+                        }
+                    }
+                    images.push(obj);
                 }
-                images.push(obj);
             }
         }
     }
