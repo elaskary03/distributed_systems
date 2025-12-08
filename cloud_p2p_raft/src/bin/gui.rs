@@ -388,6 +388,20 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           </div>
           <div id="requestCount" class="hint"></div>
           <div id="requestsList" class="out"></div>
+          <div class="row" style="margin-top:10px">
+            <div>
+              <label>Revoke: Image ID</label>
+              <input id="revokeImageId" type="text" placeholder="img-...">
+            </div>
+            <div>
+              <label>Revoke: Target User</label>
+              <input id="revokeUser" type="text" placeholder="viewer username">
+            </div>
+            <div class="btns" style="margin-top:8px">
+              <button id="revokeBtn" class="btn-warn">REVOKE ACCESS</button>
+            </div>
+          </div>
+          <div id="revokeOut" class="out"></div>
         </section>
       </div>
 
@@ -897,6 +911,30 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       } catch (_) {}
     }
 
+    async function revokeAccess() {
+      const imageId = ($('#revokeImageId').value || '').trim();
+      const target = ($('#revokeUser').value || '').trim();
+      if (!currentUser) { text('#revokeOut', 'Login first'); return; }
+      if (!imageId || !target) { text('#revokeOut', 'Image ID and target user required'); return; }
+      try {
+        const url = `${P2P_BASE}/revoke-access/${encodeURIComponent(currentUser)}/${encodeURIComponent(imageId)}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target_user: target }),
+        });
+        if (!res.ok) {
+          text('#revokeOut', `Error: ${await res.text()}`);
+          return;
+        }
+        const data = await res.json();
+        text('#revokeOut', JSON.stringify(data, null, 2));
+        await refreshOwnerRequests();
+      } catch (err) {
+        text('#revokeOut', String(err));
+      }
+    }
+
     function renderRequests() {
       const container = document.getElementById('requestsList');
       if (!pendingCache.length) {
@@ -1013,6 +1051,10 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
     $('#listRequestsBtn').addEventListener('click', async () => {
       await refreshOwnerRequests();
+    });
+
+    $('#revokeBtn').addEventListener('click', async () => {
+      await revokeAccess();
     });
 
     document.getElementById('requestsList').addEventListener('click', async (e) => {
