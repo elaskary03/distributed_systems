@@ -311,7 +311,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             </div>
           </form>
           <div id="uploadOut" class="out"></div>
-          <div class="hint">Encrypted image will be saved under <span class="pill">uploads/</span> or <span class="pill">stego/</span> by the cluster. The GUI will auto-download it once detected.</div>
+          <div class="hint">Upload an image to encrypt and push to the cluster.</div>
         </section>
 
         <section>
@@ -374,7 +374,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             <button id="peerPreviewBtn">PREVIEW</button>
             <button id="peerFullBtn">FULL</button>
             <button id="peerRequestBtn">REQUEST_IMAGE</button>
-            <button id="peerRequestMoreBtn" class="btn-accent">REQUEST_MORE_VIEWS</button>
+            <button id="peerRequestMoreBtn">REQUEST_MORE_VIEWS</button>
           </div>
           <div class="hint">FULL will fetch & decrypt for a single in-browser view. Close the viewer to consume one view and refresh quotas. Use REQUEST_IMAGE/REQUEST_MORE_VIEWS to ask for initial or additional view quotas from the owner.</div>
           <div id="peerOut" class="out"></div>
@@ -442,7 +442,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let currentUser = "";
     let cachedUsersList = "";
     let manualLogout = false;
-    let pendingCache = [];
+    let pendingNewCache = [];
+    let pendingMoreCache = [];
     let activeViewer = null;
     let lastViewedContext = null;
     const launchStatus = (msg) => { text('#loginOut', msg); document.getElementById('loginOut').style.display = 'block'; };
@@ -589,29 +590,40 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const imgs = Array.isArray(u.images) ? u.images : [];
         const color = u.online ? '#16a34a' : '#dc2626';
         const status = u.online ? 'online' : 'offline';
+        const lastSeen = formatLastSeen(u.last_seen);
         const imagesHtml = imgs.length
           ? imgs.map(img => {
               const id = escapeHtml(img.id || 'unknown');
               const owner = escapeHtml(img.owner || '');
               const remaining = img.remaining_views_for_requester !== undefined
-                ? ` • remaining: ${img.remaining_views_for_requester}`
-                : '';
+                ? `Remaining (you): ${img.remaining_views_for_requester}`
+                : 'Remaining: -';
               const sharedPw = img.shared_passphrase
-                ? ` • passphrase: ${escapeHtml(img.shared_passphrase)}`
+                ? `Passphrase: ${escapeHtml(img.shared_passphrase)}`
                 : '';
               const perms = img.permissions && typeof img.permissions === 'object'
-                ? ` • perms: ${Object.entries(img.permissions).map(([k,v]) => `${escapeHtml(k)}=${v}`).join(', ')}`
+                ? `Permissions: ${Object.entries(img.permissions).map(([k,v]) => `${escapeHtml(k)}=${v}`).join(', ')}`
                 : '';
-              return `<div class="image-chip"><code>${id}</code>${owner ? ` • owner: ${owner}` : ''}${remaining}${sharedPw}${perms}</div>`;
+              return `
+                <div class="image-chip" style="display:flex; flex-direction:column; align-items:flex-start; gap:4px;">
+                  <div><code>${id}</code>${owner ? ` • owner: ${owner}` : ''}</div>
+                  <div class="hint">${remaining}</div>
+                  ${sharedPw ? `<div class="hint">${sharedPw}</div>` : ''}
+                  ${perms ? `<div class="hint">${perms}</div>` : ''}
+                </div>
+              `;
             }).join('')
           : '<div class="image-chip">No images</div>';
         return `
-<div class="user-row">
-  <div class="user-header">
+<div class="user-row" style="padding:8px 10px; border:1px solid var(--border); border-radius:10px; margin-bottom:10px; background:#f9fafb;">
+  <div class="user-header" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
     <span class="status-dot" style="background:${color}"></span>
-    ${name} (${status})
+    <strong>${name}</strong>
+    <span class="pill">${status}</span>
+    <span class="hint">IP: ${escapeHtml(u.ip || '-')}</span>
+    <span class="hint">Last seen: ${lastSeen}</span>
   </div>
-  <div class="image-list">
+  <div class="image-list" style="margin-top:8px; display:flex; flex-direction:column; gap:8px;">
     ${imagesHtml}
   </div>
 </div>
@@ -666,7 +678,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const res = await fetch('/api/upload', { method: 'POST', body: fd });
         if (!res.ok) { text('#uploadOut', await res.text()); return; }
         const json = await res.json();
-        text('#uploadOut', JSON.stringify(json, null, 2));
 
         // Try to find the stego file and download it
         const imageId = json.image_id;
@@ -704,12 +715,12 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             a.href = stegoPath;
             a.download = fileBase;
             a.click();
-            text('#uploadOut', JSON.stringify(json, null, 2) + `\n✅ Stego saved to P2P server and downloaded: ${fileBase}`);
+            text('#uploadOut', '✅ Done');
           } catch (err) {
-            text('#uploadOut', JSON.stringify(json, null, 2) + `\n⚠️ Stego fetched, but P2P upload failed: ${err}`);
+            text('#uploadOut', `⚠️ Uploaded but P2P push failed: ${err}`);
           }
         } else {
-          text('#uploadOut', JSON.stringify(json, null, 2) + `\n⚠️ Stego not found yet for ${imageId}`);
+          text('#uploadOut', '⚠️ Uploaded; awaiting stego generation.');
         }
       } catch (err) { text('#uploadOut', String(err)); }
     });
@@ -719,7 +730,10 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       try {
         const list = await (await fetch('/api/users')).text();
         cachedUsersList = list;
-        text('#usersOut', list);
+        const users = parseUsers(list);
+        if (!users.length) { text('#usersOut', 'No users'); return; }
+        const rows = users.map(u => `${u.user} • ${u.ip || '-'} • ${u.online ? 'online' : 'offline'} • last seen ${formatLastSeen(u.last_seen)}`);
+        text('#usersOut', rows.join('\n'));
       }
       catch (err) { text('#usersOut', String(err)); }
     });
@@ -732,7 +746,16 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
     /* LIST_PEERS */
     $('#peersBtn').addEventListener('click', async () => {
-      try { text('#peersOut', await (await fetch('/api/peers')).text()); }
+      try {
+        const raw = await ensureUsersList();
+        const users = parseUsers(raw);
+        if (!users.length) { text('#peersOut', 'No peers found'); return; }
+        const rows = users.map(u => {
+          const status = u.online ? 'online' : 'offline';
+          return `${u.user} • ${u.ip || '-'} • ${status} • last seen ${formatLastSeen(u.last_seen)}`;
+        });
+        text('#peersOut', rows.join('\n'));
+      }
       catch (err) { text('#peersOut', String(err)); }
     });
 
@@ -755,13 +778,14 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       return lines
         .map(l => {
           const parts = l.split(/\s+/);
-          if (parts.length < 5) return null;
-          const [user, ip, port, online] = [parts[0], parts[1], parts[2], parts[3]];
+          if (parts.length < 4) return null;
+          const [user, ip, port, online, lastSeenRaw] = [parts[0], parts[1], parts[2], parts[3], parts[4]];
           return {
             user,
             ip,
             port: parseInt(port, 10) || DEFAULT_P2P_PORT,
             online: online === 'true',
+            last_seen: lastSeenRaw ? parseInt(lastSeenRaw, 10) || 0 : 0,
           };
         })
         .filter(Boolean);
@@ -770,6 +794,20 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     async function getOnlinePeers() {
       const body = await ensureUsersList();
       return parseUsers(body).filter(u => u.online && !!u.ip);
+    }
+
+    function formatLastSeen(ns = 0) {
+      if (!ns) return 'unknown';
+      const ms = ns / 1_000_000;
+      const diffMs = Date.now() - ms;
+      if (diffMs < 0) return 'just now';
+      const mins = Math.floor(diffMs / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return `${mins}m ago`;
+      const hours = Math.floor(mins / 60);
+      if (hours < 24) return `${hours}h ago`;
+      const days = Math.floor(hours / 24);
+      return `${days}d ago`;
     }
 
     async function resolvePeer(name, opts = {}) {
@@ -799,6 +837,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
               online: u.online,
               ip: u.ip,
               p2p_port: u.port,
+              last_seen: u.last_seen || 0,
               images: [],
             }));
           } catch (_) {}
@@ -824,6 +863,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             online: true,
             ip: peer.ip,
             p2p_port: peer.port,
+            last_seen: peer.last_seen || 0,
             status: json.status || 'ok',
             images,
           });
@@ -854,6 +894,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           online: u.online !== undefined ? u.online : existing.online,
           ip: u.ip || existing.ip || '',
           p2p_port: u.p2p_port || existing.p2p_port || DEFAULT_P2P_PORT,
+          last_seen: u.last_seen || existing.last_seen || 0,
         });
       }
       return Array.from(map.values());
@@ -874,16 +915,22 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const res = await fetch(url);
         if (!res.ok) return;
         const data = await res.json();
-        const pending = [];
+        const pendingNew = [];
+        const pendingMore = [];
         for (const img of data.images || []) {
           if (img.owner === currentUser && Array.isArray(img.pending_requests)) {
+            const perms = (img.permissions && typeof img.permissions === 'object') ? img.permissions : {};
             for (const req of img.pending_requests) {
-              pending.push({ image: img.id, viewer: req.viewer, requested: req.requested_views });
+              const existing = typeof perms[req.viewer] === 'number' ? perms[req.viewer] : 0;
+              const bucket = existing > 0 ? pendingMore : pendingNew;
+              bucket.push({ image: img.id, viewer: req.viewer, requested: req.requested_views, existing });
             }
           }
         }
-        pendingCache = pending;
-        text('#requestCount', `${pending.length} pending request(s)`);
+        pendingNewCache = pendingNew;
+        pendingMoreCache = pendingMore;
+        const total = pendingNew.length + pendingMore.length;
+        text('#requestCount', `${total} pending request(s): ${pendingNew.length} new, ${pendingMore.length} more-views`);
         renderRequests();
         document.getElementById('owner-requests').style.display = 'block';
       } catch (_) {}
@@ -915,24 +962,39 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
     function renderRequests() {
       const container = document.getElementById('requestsList');
-      if (!pendingCache.length) {
+      const renderGroup = (list, kind) => {
+        if (!list.length) return '<div class="hint">None</div>';
+        return list.map((req, idx) => {
+          return `
+          <div class="req" data-img="${req.image}" data-viewer="${req.viewer}" data-kind="${kind}" data-idx="${idx}">
+            <div><strong>Image:</strong> ${req.image}</div>
+            <div><strong>Viewer:</strong> ${req.viewer}</div>
+            <div><strong>Requested:</strong> ${req.requested}${req.existing ? ` (already had ${req.existing})` : ''}</div>
+            <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
+              <input type="number" id="${kind}-approve-${idx}" value="${req.requested}" min="1" style="width:90px;">
+              <input type="text" id="${kind}-pass-${idx}" placeholder="passphrase (optional)" style="width:180px;">
+              <button class="approve-btn" data-kind="${kind}" data-idx="${idx}">Approve</button>
+              <button class="reject-btn" data-kind="${kind}" data-idx="${idx}">Reject</button>
+            </div>
+          </div>`;
+        }).join('\n');
+      };
+
+      const any = pendingNewCache.length + pendingMoreCache.length;
+      if (!any) {
         container.textContent = 'No pending requests';
         return;
       }
-      container.innerHTML = pendingCache.map((req, idx) => {
-        return `
-        <div class="req" data-img="${req.image}" data-viewer="${req.viewer}">
-          <div><strong>Image:</strong> ${req.image}</div>
-          <div><strong>Viewer:</strong> ${req.viewer}</div>
-          <div><strong>Requested:</strong> ${req.requested}</div>
-          <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
-            <input type="number" id="approve-${idx}" value="${req.requested}" min="1" style="width:90px;">
-            <input type="text" id="pass-${idx}" placeholder="passphrase (optional)" style="width:180px;">
-            <button class="approve-btn" data-idx="${idx}">Approve</button>
-            <button class="reject-btn" data-idx="${idx}">Reject</button>
-          </div>
-        </div>`;
-      }).join('\n');
+      container.innerHTML = `
+        <div style="margin-bottom:10px;">
+          <h4>New access requests</h4>
+          ${renderGroup(pendingNewCache, 'new')}
+        </div>
+        <div>
+          <h4>More views requests</h4>
+          ${renderGroup(pendingMoreCache, 'more')}
+        </div>
+      `;
     }
 
     /* P2P actions */
@@ -1039,12 +1101,14 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       const btn = e.target;
       if (btn.classList.contains('approve-btn')) {
         const idx = parseInt(btn.dataset.idx || '-1', 10);
-        const req = pendingCache[idx];
+        const kind = btn.dataset.kind || 'new';
+        const list = kind === 'more' ? pendingMoreCache : pendingNewCache;
+        const req = list[idx];
         if (!req) return;
-        const input = document.getElementById(`approve-${idx}`);
+        const input = document.getElementById(`${kind}-approve-${idx}`);
         const approved = parseInt((input?.value || '0'), 10);
         if (!approved || approved <= 0) { text('#requestsList', 'Approved views must be positive'); return; }
-        const passInput = document.getElementById(`pass-${idx}`);
+        const passInput = document.getElementById(`${kind}-pass-${idx}`);
         const passphrase = (passInput?.value || '').trim();
         const url = `${P2P_BASE}/approve-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
         await fetch(url, {
@@ -1055,7 +1119,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         await refreshOwnerRequests();
       } else if (btn.classList.contains('reject-btn')) {
         const idx = parseInt(btn.dataset.idx || '-1', 10);
-        const req = pendingCache[idx];
+        const kind = btn.dataset.kind || 'new';
+        const list = kind === 'more' ? pendingMoreCache : pendingNewCache;
+        const req = list[idx];
         if (!req) return;
         const url = `${P2P_BASE}/reject-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
         await fetch(url, {
@@ -1167,7 +1233,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       clearOutputs();
       showMainUI(false);
       document.getElementById('sessionLabel').textContent = 'Logged in as: -';
-      pendingCache = [];
+      pendingNewCache = [];
+      pendingMoreCache = [];
       text('#requestsList', '');
       text('#requestCount', '');
       document.getElementById('owner-requests').style.display = 'none';
