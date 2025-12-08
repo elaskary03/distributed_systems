@@ -2104,7 +2104,7 @@ impl NetNode {
                     info!("Node {} synced image metadata for {}", self.id, user);
                 }
                 Err(e) => {
-                    error!(
+                    debug!(
                         "Node {} failed to parse metadata for {}: {}",
                         self.id, user, e
                     );
@@ -2116,8 +2116,8 @@ impl NetNode {
                 }
             },
             Err(e) => {
-                error!(
-                    "Node {} failed to sync metadata for {}: {}",
+                debug!(
+                    "Node {} treating {} as offline for metadata sync: {}",
                     self.id, user, e
                 );
                 let cached_obj = offline_with_cache(cached.as_ref());

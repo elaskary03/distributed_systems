@@ -26,7 +26,7 @@ struct Args {
     listen: String,
 
     /// Public base URL for the GUI/static file server (needed when nodes run on other hosts), e.g. http://192.168.1.10:8080
-    #[arg(long)]
+    #[arg(long, default_value = "http://127.0.0.1:8080")]
     public_base: Option<String>,
 
     /// Comma-separated list of seed client API addresses (node-facing), e.g. 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003
@@ -422,25 +422,14 @@ async fn handle_client(
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_else(|| format!("{}.bin", image_id));
 
-                let (input_arg, output_arg) = if let Some(base) = &cfg.public_base {
-                    let base = base.trim_end_matches('/');
-                    let input_url = format!("{}/files/uploads/{}", base, upload_name);
-                    // Nodes will POST the stego PNG back here
-                    let output_url = format!("{}/api/upload-stego?image_id={}", base, image_id);
-                    (input_url, output_url)
-                } else {
-                    // Legacy single-host mode: read/write local files
-                    let output_path = get_data_dir()
-                        .join("stego")
-                        .join(format!("{}.png", image_id));
-                    if let Some(parent) = Path::new(&output_path).parent() {
-                        let _ = fs::create_dir_all(parent);
-                    }
-                    (
-                        input_path.clone(),
-                        output_path.to_string_lossy().to_string(),
-                    )
-                };
+                let base = cfg
+                    .public_base
+                    .clone()
+                    .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+                let base = base.trim_end_matches('/');
+                let input_arg = format!("{}/files/uploads/{}", base, upload_name);
+                // Nodes will POST the stego PNG back here
+                let output_arg = format!("{}/api/upload-stego?image_id={}", base, image_id);
 
                 let op_id = next_op_id();
                 let payload = format!(
