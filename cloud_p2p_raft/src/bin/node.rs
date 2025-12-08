@@ -1122,13 +1122,6 @@ impl NetNode {
             let log = self.log.read().await;
             for i in (*last_applied + 1)..=commit_index {
                 if let Some(entry) = log.get(i as usize - 1) {
-                    if !matches!(*self.state.read().await, RaftState::Leader) {
-                        info!(
-                            "Node {} (follower) skipping execution of {}",
-                            self.id, entry.command
-                        );
-                        continue;
-                    }
                     let mut parts = entry.command.split_whitespace();
                     match parts.next() {
                         Some("REGISTER") => {
