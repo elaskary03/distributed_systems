@@ -443,9 +443,10 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
     const WS_URL = "{{WS_URL}}";
-    const P2P_BASE = "http://192.168.8.247:10000";
     const DEFAULT_P2P_PORT = 10000;
     const LAUNCH_PORT_DEFAULT = 10002;
+    const UI_HOST = (window.location && window.location.hostname) ? window.location.hostname : '127.0.0.1';
+    const P2P_BASE = `http://${UI_HOST}:${DEFAULT_P2P_PORT}`;
     let presenceWs = null;
     let currentUser = "";
     let cachedUsersList = "";
@@ -453,6 +454,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let pendingCache = [];
     let activeViewer = null;
     let lastViewedContext = null;
+    let localLaunchStarted = false;
     const launchStatus = (msg) => { text('#loginOut', msg); document.getElementById('loginOut').style.display = 'block'; };
 
     function sendOfflineBeacon() {
@@ -510,13 +512,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       presenceWs.onclose = () => {
         presenceWs = null;
         if (manualLogout) { manualLogout = false; return; }
-        cachedUsersList = "";
-        clearOutputs();
-        currentUser = "";
-        showMainUI(false);
-        document.getElementById('sessionLabel').textContent = 'Logged in as: -';
-        text('#loginOut', 'Connection closed. Please log in again.');
+        text('#loginOut', 'Connection lost, retrying...');
         document.getElementById('loginOut').style.display = 'block';
+        setTimeout(connectPresence, 800);
       };
       presenceWs.onerror = (e) => {
         console.error('ws error', e);
@@ -641,13 +639,17 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       return null;
     }
 
-    /* Login */
-    $('#loginBtn').addEventListener('click', async () => {
+    function populateDefaults() {
+      if (!$('#launchPort').value) { $('#launchPort').value = LAUNCH_PORT_DEFAULT; }
+    }
+
+    async function performLogin(auto = false) {
       const user = ($('#loginUser').value || '').trim();
-      const pass = ($('#loginPass').value || '').trim();
       if (!user) {
-        text('#loginOut', 'Username is required');
-        document.getElementById('loginOut').style.display = 'block';
+        if (!auto) {
+          text('#loginOut', 'Username is required');
+          document.getElementById('loginOut').style.display = 'block';
+        }
         return;
       }
       currentUser = user;
@@ -655,15 +657,24 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       showMainUI(true);
       document.getElementById('loginOut').style.display = 'none';
       clearOutputs();
+      if (!localLaunchStarted) {
+        localLaunchStarted = true;
+        startLocalClient(user).catch(() => {});
+      }
       connectPresence();
-      startLocalClient(user).catch(() => {});
-      // Pull initial user list
       try {
         const list = await (await fetch('/api/users')).text();
         cachedUsersList = list;
         text('#usersOut', list);
       } catch (_) {}
-      await refreshOwnerRequests();
+      await refreshOwnerRequests().catch(() => {});
+      refreshPeerList().catch(() => {});
+    }
+
+    /* Login (manual and auto) */
+    $('#loginBtn').addEventListener('click', async () => { await performLogin(false); });
+    window.addEventListener('load', () => {
+      populateDefaults();
     });
 
     /* Upload & ENCRYPT_ON_CLOUD */
@@ -703,8 +714,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             }
 
             let uploadTarget = null;
-            try { uploadTarget = await resolvePeer(currentUser); } catch (_) {}
-            const p2pUrl = `${P2P_BASE}/upload-image`;
+            try { uploadTarget = await resolvePeer(currentUser, { allowOffline: true }); } catch (_) {}
+            const p2pUrl = `${peerBase(uploadTarget)}/upload-image`;
             await fetch(p2pUrl, { method: 'POST', body: fdUpload });
 
             // Download locally for user convenience
@@ -780,6 +791,19 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       return parseUsers(body).filter(u => u.online && !!u.ip);
     }
 
+    function peerBase(peer) {
+      if (peer && peer.ip) {
+        const port = peer.port || DEFAULT_P2P_PORT;
+        return `http://${peer.ip}:${port}`;
+      }
+      return P2P_BASE; // fallback to local host default
+    }
+
+    async function peerBaseByUser(user, opts = {}) {
+      const peer = await resolvePeer(user, opts);
+      return peerBase(peer);
+    }
+
     async function resolvePeer(name, opts = {}) {
       const peers = await getOnlinePeers();
       const found = peers.find(p => p.user === name);
@@ -821,7 +845,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       for (const peer of peers) {
         const owner = peer.user;
         if (!owner) continue;
-        const url = `${P2P_BASE}/list-images?owner=${encodeURIComponent(owner)}&requester=${encodeURIComponent(currentUser || '')}`;
+        const base = peerBase(peer);
+        const url = `${base}/list-images?owner=${encodeURIComponent(owner)}&requester=${encodeURIComponent(currentUser || '')}`;
         try {
           const res = await fetch(url);
           const json = await res.json();
@@ -878,7 +903,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     async function refreshOwnerRequests() {
       if (!currentUser) { return; }
       try {
-        const url = `${P2P_BASE}/list-images?owner=${encodeURIComponent(currentUser)}&requester=${encodeURIComponent(currentUser)}`;
+        const base = await peerBaseByUser(currentUser, { allowOffline: true });
+        const url = `${base}/list-images?owner=${encodeURIComponent(currentUser)}&requester=${encodeURIComponent(currentUser)}`;
         const res = await fetch(url);
         if (!res.ok) return;
         const data = await res.json();
@@ -944,7 +970,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const info = await resolvePeer(peer);
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
         const owner = info.user || peer;
-        const url = `${P2P_BASE}/preview/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
+        const base = peerBase(info);
+        const url = `${base}/preview/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
         const { ct, buf } = await fetchBinary(url);
         if (ct.startsWith('image/')) {
           const blob = new Blob([buf], { type: ct });
@@ -968,7 +995,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const info = await resolvePeer(peer);
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
         const owner = info.user || peer;
-        const url = `${P2P_BASE}/full/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}?requester=${encodeURIComponent(currentUser)}`;
+        const base = peerBase(info);
+        const url = `${base}/full/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}?requester=${encodeURIComponent(currentUser)}`;
         const res = await fetch(url);
         const ct = res.headers.get('content-type') || '';
         if (ct.startsWith('image/')) {
@@ -985,7 +1013,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           const decBlob = await decRes.blob();
           // Mark the view as consumed only after successful decrypt
           try {
-            const consumeUrl = `${P2P_BASE}/consume-view/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
+            const consumeUrl = `${base}/consume-view/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
             await fetch(consumeUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1026,7 +1054,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         if (!approved || approved <= 0) { text('#requestsList', 'Approved views must be positive'); return; }
         const passInput = document.getElementById(`pass-${idx}`);
         const passphrase = (passInput?.value || '').trim();
-        const url = `${P2P_BASE}/approve-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
+        const base = await peerBaseByUser(currentUser, { allowOffline: true });
+        const url = `${base}/approve-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
         await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1037,7 +1066,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const idx = parseInt(btn.dataset.idx || '-1', 10);
         const req = pendingCache[idx];
         if (!req) return;
-        const url = `${P2P_BASE}/reject-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
+        const base = await peerBaseByUser(currentUser, { allowOffline: true });
+        const url = `${base}/reject-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
         await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1058,7 +1088,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const info = await resolvePeer(peer, { allowOffline: true });
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
         const owner = info.user || peer;
-        const url = `${P2P_BASE}/request-image/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
+        const base = peerBase(info);
+        const url = `${base}/request-image/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
         const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

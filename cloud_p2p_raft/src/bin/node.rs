@@ -41,12 +41,8 @@ struct Args {
     /// Base port for client API (actual port = base + node id)
     #[arg(long, default_value_t = 9000, value_parser = clap::value_parser!(u16).range(1..))]
     client_base_port: u16,
-    /// Base URL of central P2P image server
-    #[arg(
-        long,
-        env = "CLOUDP2P_P2P_BASE",
-        default_value = "http://192.168.8.247:10000"
-    )]
+    /// Optional fallback base URL for P2P image HTTP (leave empty to use peer IP:port)
+    #[arg(long, env = "CLOUDP2P_P2P_BASE", default_value = "")]
     p2p_base: String,
 }
 
@@ -2062,12 +2058,31 @@ impl NetNode {
         }
     }
 
-    async fn sync_user_metadata(&self, user: &str, _ip: &str, _p2p_port: u16) {
-        if self.p2p_base_url.trim().is_empty() {
-            return;
-        }
+    async fn sync_user_metadata(&self, user: &str, ip: &str, p2p_port: u16) {
         let cached = self.image_metadata.read().await.get(user).cloned();
-        let base = self.p2p_base_url.trim_end_matches('/');
+        // Prefer the caller-provided IP/port; fall back to registered users; last resort is the legacy base URL (if set).
+        let (addr_ip, addr_port) = if !ip.trim().is_empty() {
+            (ip.to_string(), if p2p_port == 0 { 10000 } else { p2p_port })
+        } else if let Some(entry) = self.registered_users.read().await.get(user) {
+            (
+                entry.ip.clone(),
+                if entry.p2p_port == 0 {
+                    10000
+                } else {
+                    entry.p2p_port
+                },
+            )
+        } else {
+            (String::new(), 0)
+        };
+
+        let base = if !addr_ip.is_empty() && addr_port > 0 {
+            format!("http://{}:{}", addr_ip, addr_port)
+        } else if self.p2p_base_url.trim().is_empty() {
+            return;
+        } else {
+            self.p2p_base_url.trim_end_matches('/').to_string()
+        };
         let url = format!("{}/list-images?owner={}&requester={}", base, user, user);
         let client = self.http_client.clone();
         let resp = client.get(url).timeout(Duration::from_secs(4)).send().await;
