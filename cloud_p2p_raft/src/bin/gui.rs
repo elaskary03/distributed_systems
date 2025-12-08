@@ -713,9 +713,8 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
               fdUpload.append('preview', new File([previewBlob], `preview-${fileBase}`, { type: 'image/png' }));
             }
 
-            let uploadTarget = null;
-            try { uploadTarget = await resolvePeer(currentUser, { allowOffline: true }); } catch (_) {}
-            const p2pUrl = `${peerBase(uploadTarget)}/upload-image`;
+            // For owner uploads, always push to the local client_p2p the GUI controls.
+            const p2pUrl = `${P2P_BASE}/upload-image`;
             await fetch(p2pUrl, { method: 'POST', body: fdUpload });
 
             // Download locally for user convenience
