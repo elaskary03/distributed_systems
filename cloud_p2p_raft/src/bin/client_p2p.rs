@@ -1,7 +1,7 @@
 use axum::{
     extract::{Multipart, Path as AxumPath, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -84,6 +84,26 @@ struct ConsumeViewReq {
     requester: String,
 }
 
+#[derive(Deserialize)]
+struct UpdateViewReq {
+    requester: String,
+    delta: i64,
+}
+
+#[derive(Deserialize)]
+struct UpdatePermissionsReq {
+    target_user: String,
+    new_quota: i64,
+}
+
+fn owner_guard(st: &AppState, owner: &str) -> Option<Response> {
+    if owner == st.owner {
+        None
+    } else {
+        Some(StatusCode::NOT_FOUND.into_response())
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -105,12 +125,26 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/upload-image", post(upload_image))
         .route("/list-images", get(list_images))
+        .route("/list-images/:owner", get(list_images_owner))
         .route("/preview/:image_id", get(preview_image))
+        .route("/preview/:owner/:image_id", get(preview_image_owner))
         .route("/full/:image_id", get(full_image))
+        .route("/full/:owner/:image_id", get(full_image_owner))
         .route("/request-image/:image_id", post(request_image))
+        .route("/request-image/:owner/:image_id", post(request_image_owner))
         .route("/approve-request/:image_id", post(approve_request))
+        .route("/approve-request/:owner/:image_id", post(approve_request_owner))
         .route("/reject-request/:image_id", post(reject_request))
+        .route("/reject-request/:owner/:image_id", post(reject_request_owner))
         .route("/consume-view/:image_id", post(consume_view))
+        .route("/consume-view/:owner/:image_id", post(consume_view_owner))
+        .route("/view-update/:image_id", post(view_update))
+        .route("/view-update/:owner/:image_id", post(view_update_owner))
+        .route("/update-permissions/:image_id", post(update_permissions))
+        .route(
+            "/update-permissions/:owner/:image_id",
+            post(update_permissions_owner),
+        )
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -229,12 +263,35 @@ async fn upload_image(
 async fn list_images(
     State(st): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl axum::response::IntoResponse {
-    let requester = params.get("requester").cloned();
-    let is_owner = requester.as_ref().map(|r| r == &st.owner).unwrap_or(false);
+) -> Response {
+    list_images_inner(&st, params.get("requester").cloned(), None).await
+}
+
+async fn list_images_owner(
+    State(st): State<AppState>,
+    AxumPath(owner): AxumPath<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Some(resp) = owner_guard(&st, &owner) {
+        return resp;
+    }
+    list_images_inner(&st, params.get("requester").cloned(), Some(owner)).await
+}
+
+async fn list_images_inner(
+    st: &AppState,
+    requester: Option<String>,
+    owner_override: Option<String>,
+) -> Response {
+    let owner = owner_override.unwrap_or_else(|| st.owner.clone());
+    if owner != st.owner {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let is_owner = requester.as_ref().map(|r| r == &owner).unwrap_or(false);
     let mut images = Vec::new();
     // Only list images belonging to this server's owner to avoid leaking other users' data
-    let owner_dir = st.base.join(&st.owner);
+    let owner_dir = st.base.join(&owner);
     let meta_dir = owner_dir.clone();
     let candidates = vec![owner_dir.clone(), owner_dir.join("encrypted")];
     for enc_dir in candidates.into_iter().filter(|d| d.exists()) {
@@ -257,7 +314,7 @@ async fn list_images(
                 }
                 if let Ok(mut meta) = load_metadata(&meta_dir, &id).await {
                     if meta.owner.is_empty() {
-                        meta.owner = st.owner.clone();
+                        meta.owner = owner.clone();
                     }
                     let remaining = requester
                         .as_ref()
@@ -276,7 +333,7 @@ async fn list_images(
                             obj["shared_passphrase"] = serde_json::Value::String(pw.clone());
                         }
                     }
-                    if is_owner && meta.owner == st.owner {
+                    if is_owner && meta.owner == owner {
                         if let Ok(reqs) = load_pending_requests(&meta_dir, &id).await {
                             obj["pending_requests"] = serde_json::to_value(reqs).unwrap_or(json!([]));
                         }
@@ -286,30 +343,45 @@ async fn list_images(
             }
         }
     }
-    Json(json!({"status":"ok","images": images}))
+    Json(json!({"status":"ok","images": images})).into_response()
 }
 
 async fn preview_image(
     State(st): State<AppState>,
     AxumPath(image_id): AxumPath<String>,
-) -> impl IntoResponse {
+) -> Response {
+    preview_image_inner(&st, &image_id).await
+}
+
+async fn preview_image_owner(
+    State(st): State<AppState>,
+    AxumPath((owner, image_id)): AxumPath<(String, String)>,
+) -> Response {
+    if let Some(resp) = owner_guard(&st, &owner) {
+        return resp;
+    }
+    preview_image_inner(&st, &image_id).await
+}
+
+async fn preview_image_inner(st: &AppState, image_id: &str) -> Response {
     // resolve owner paths (original, encrypted, meta)
-    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
+    let paths = resolve_owner_paths(&st.base, &st.owner, image_id).await;
 
     // 1) if preview exists, use it
-    if let Ok(bytes) = load_preview_image(&paths.original, &image_id).await {
+    if let Ok(bytes) = load_preview_image(&paths.original, image_id).await {
         return (StatusCode::OK, [("content-type", "image/png")], bytes).into_response();
     }
 
     // 2) otherwise, create preview from ORIGINAL ONLY
-    match load_image(&paths.original, &image_id).await {
+    match load_image(&paths.original, image_id).await {
         Ok(orig) => match make_preview_bytes(&orig) {
             Ok(resized) => {
-                return (StatusCode::OK, [("content-type", "image/png")], resized).into_response();
+                return (StatusCode::OK, [("content-type", "image/png")], resized)
+                    .into_response();
             }
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         },
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -317,21 +389,39 @@ async fn full_image(
     State(st): State<AppState>,
     AxumPath(image_id): AxumPath<String>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl axum::response::IntoResponse {
-    let requester = params.get("requester");
-    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
+) -> Response {
+    full_image_inner(&st, &image_id, params.get("requester").cloned()).await
+}
 
+async fn full_image_owner(
+    State(st): State<AppState>,
+    AxumPath((owner, image_id)): AxumPath<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Some(resp) = owner_guard(&st, &owner) {
+        return resp;
+    }
+    full_image_inner(&st, &image_id, params.get("requester").cloned()).await
+}
+
+async fn full_image_inner(
+    st: &AppState,
+    image_id: &str,
+    requester: Option<String>,
+) -> Response {
     let requester = match requester {
-        Some(r) => r.clone(),
+        Some(r) => r,
         None => return (StatusCode::BAD_REQUEST, "missing requester").into_response(),
     };
 
-    let mut meta = match load_metadata(&paths.meta, &image_id).await {
+    let paths = resolve_owner_paths(&st.base, &st.owner, image_id).await;
+
+    let mut meta = match load_metadata(&paths.meta, image_id).await {
         Ok(m) => m,
         Err(_) => {
             let _ = enqueue_pending(
                 &paths.meta,
-                &image_id,
+                image_id,
                 PendingUpdate::View {
                     requester: requester.clone(),
                     delta: -1,
@@ -350,7 +440,7 @@ async fn full_image(
         // No decrement here; handled by /consume-view after successful decrypt
     }
 
-    match load_image(&paths.encrypted, &image_id).await {
+    match load_image(&paths.encrypted, image_id).await {
         Ok(bytes) => {
             let cd = format!("inline; filename=\"{}.png\"", image_id);
             (
@@ -372,7 +462,26 @@ async fn request_image(
     State(st): State<AppState>,
     AxumPath(image_id): AxumPath<String>,
     Json(body): Json<RequestImage>,
-) -> impl axum::response::IntoResponse {
+) -> Response {
+    request_image_inner(&st, &image_id, body).await
+}
+
+async fn request_image_owner(
+    State(st): State<AppState>,
+    AxumPath((owner, image_id)): AxumPath<(String, String)>,
+    Json(body): Json<RequestImage>,
+) -> Response {
+    if let Some(resp) = owner_guard(&st, &owner) {
+        return resp;
+    }
+    request_image_inner(&st, &image_id, body).await
+}
+
+async fn request_image_inner(
+    st: &AppState,
+    image_id: &str,
+    body: RequestImage,
+) -> Response {
     if body.requester.trim().is_empty() || body.views <= 0 {
         return (
             StatusCode::BAD_REQUEST,
@@ -380,12 +489,12 @@ async fn request_image(
         )
             .into_response();
     }
-    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
-    if load_image(&paths.encrypted, &image_id).await.is_err() {
+    let paths = resolve_owner_paths(&st.base, &st.owner, image_id).await;
+    if load_image(&paths.encrypted, image_id).await.is_err() {
         return (StatusCode::NOT_FOUND, "image not found").into_response();
     }
 
-    match load_metadata(&paths.meta, &image_id).await {
+    match load_metadata(&paths.meta, image_id).await {
         Ok(meta) => {
             if meta.permissions.get(&body.requester).copied().unwrap_or(0) > 0 {
                 return (StatusCode::BAD_REQUEST, "already has quota").into_response();
@@ -394,7 +503,7 @@ async fn request_image(
         Err(_) => {}
     }
 
-    let mut pending = load_pending_requests(&paths.meta, &image_id)
+    let mut pending = load_pending_requests(&paths.meta, image_id)
         .await
         .unwrap_or_default();
     if pending.iter().any(|r| r.viewer == body.requester) {
@@ -404,7 +513,7 @@ async fn request_image(
         viewer: body.requester.clone(),
         requested_views: body.views,
     });
-    if let Err(e) = save_pending_requests(&paths.meta, &image_id, &pending).await {
+    if let Err(e) = save_pending_requests(&paths.meta, image_id, &pending).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("save pending: {e}"),
@@ -419,15 +528,34 @@ async fn consume_view(
     State(st): State<AppState>,
     AxumPath(image_id): AxumPath<String>,
     Json(body): Json<ConsumeViewReq>,
-) -> impl axum::response::IntoResponse {
+) -> Response {
+    consume_view_inner(&st, &image_id, body).await
+}
+
+async fn consume_view_owner(
+    State(st): State<AppState>,
+    AxumPath((owner, image_id)): AxumPath<(String, String)>,
+    Json(body): Json<ConsumeViewReq>,
+) -> Response {
+    if let Some(resp) = owner_guard(&st, &owner) {
+        return resp;
+    }
+    consume_view_inner(&st, &image_id, body).await
+}
+
+async fn consume_view_inner(
+    st: &AppState,
+    image_id: &str,
+    body: ConsumeViewReq,
+) -> Response {
     if body.requester.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "requester required").into_response();
     }
-    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
-    if load_image(&paths.encrypted, &image_id).await.is_err() {
+    let paths = resolve_owner_paths(&st.base, &st.owner, image_id).await;
+    if load_image(&paths.encrypted, image_id).await.is_err() {
         return (StatusCode::NOT_FOUND, "image not found").into_response();
     }
-    let mut meta = match load_metadata(&paths.meta, &image_id).await {
+    let mut meta = match load_metadata(&paths.meta, image_id).await {
         Ok(m) => m,
         Err(_) => return (StatusCode::NOT_FOUND, "metadata not found").into_response(),
     };
@@ -441,8 +569,8 @@ async fn consume_view(
     }
     meta.last_update_ns = now_nanos();
     ensure_owner_default_perm(&mut meta);
-    let _ = save_metadata(&paths.meta, &image_id, &meta).await;
-    let _ = replay_pending(&paths.meta, &image_id).await;
+    let _ = save_metadata(&paths.meta, image_id, &meta).await;
+    let _ = replay_pending(&paths.meta, image_id).await;
 
     Json(json!({"status":"ok","remaining": meta.permissions.get(&body.requester).copied().unwrap_or(0)})).into_response()
 }
@@ -451,7 +579,26 @@ async fn approve_request(
     State(st): State<AppState>,
     AxumPath(image_id): AxumPath<String>,
     Json(body): Json<RequestImage>,
-) -> impl axum::response::IntoResponse {
+) -> Response {
+    approve_request_inner(&st, &image_id, body).await
+}
+
+async fn approve_request_owner(
+    State(st): State<AppState>,
+    AxumPath((owner, image_id)): AxumPath<(String, String)>,
+    Json(body): Json<RequestImage>,
+) -> Response {
+    if let Some(resp) = owner_guard(&st, &owner) {
+        return resp;
+    }
+    approve_request_inner(&st, &image_id, body).await
+}
+
+async fn approve_request_inner(
+    st: &AppState,
+    image_id: &str,
+    body: RequestImage,
+) -> Response {
     if body.requester.trim().is_empty() || body.views <= 0 {
         return (
             StatusCode::BAD_REQUEST,
@@ -459,18 +606,18 @@ async fn approve_request(
         )
             .into_response();
     }
-    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
-    if load_image(&paths.encrypted, &image_id).await.is_err() {
+    let paths = resolve_owner_paths(&st.base, &st.owner, image_id).await;
+    if load_image(&paths.encrypted, image_id).await.is_err() {
         return (StatusCode::NOT_FOUND, "image not found").into_response();
     }
-    let mut meta = load_metadata(&paths.meta, &image_id)
+    let mut meta = load_metadata(&paths.meta, image_id)
         .await
         .unwrap_or_else(|_| default_metadata(&st.owner, None));
     if meta.owner != st.owner {
         return (StatusCode::FORBIDDEN, "not owner").into_response();
     }
 
-    let mut pending = load_pending_requests(&paths.meta, &image_id)
+    let mut pending = load_pending_requests(&paths.meta, image_id)
         .await
         .unwrap_or_default();
     if !pending.iter().any(|r| r.viewer == body.requester) {
@@ -488,11 +635,11 @@ async fn approve_request(
         }
     }
 
-    let _ = save_metadata(&paths.meta, &image_id, &meta).await;
+    let _ = save_metadata(&paths.meta, image_id, &meta).await;
 
     pending.retain(|r| r.viewer != body.requester);
-    let _ = save_pending_requests(&paths.meta, &image_id, &pending).await;
-    let _ = replay_pending(&paths.meta, &image_id).await;
+    let _ = save_pending_requests(&paths.meta, image_id, &pending).await;
+    let _ = replay_pending(&paths.meta, image_id).await;
 
     Json(json!({"status":"ok","permissions": meta.permissions})).into_response()
 }
@@ -501,22 +648,41 @@ async fn reject_request(
     State(st): State<AppState>,
     AxumPath(image_id): AxumPath<String>,
     Json(body): Json<RequestImage>,
-) -> impl axum::response::IntoResponse {
+) -> Response {
+    reject_request_inner(&st, &image_id, body).await
+}
+
+async fn reject_request_owner(
+    State(st): State<AppState>,
+    AxumPath((owner, image_id)): AxumPath<(String, String)>,
+    Json(body): Json<RequestImage>,
+) -> Response {
+    if let Some(resp) = owner_guard(&st, &owner) {
+        return resp;
+    }
+    reject_request_inner(&st, &image_id, body).await
+}
+
+async fn reject_request_inner(
+    st: &AppState,
+    image_id: &str,
+    body: RequestImage,
+) -> Response {
     if body.requester.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "viewer required").into_response();
     }
-    let paths = resolve_owner_paths(&st.base, &st.owner, &image_id).await;
-    if load_image(&paths.encrypted, &image_id).await.is_err() {
+    let paths = resolve_owner_paths(&st.base, &st.owner, image_id).await;
+    if load_image(&paths.encrypted, image_id).await.is_err() {
         return (StatusCode::NOT_FOUND, "image not found").into_response();
     }
-    let meta = load_metadata(&paths.meta, &image_id)
+    let meta = load_metadata(&paths.meta, image_id)
         .await
         .unwrap_or_else(|_| default_metadata(&st.owner, None));
     if meta.owner != st.owner {
         return (StatusCode::FORBIDDEN, "not owner").into_response();
     }
 
-    let mut pending = load_pending_requests(&paths.meta, &image_id)
+    let mut pending = load_pending_requests(&paths.meta, image_id)
         .await
         .unwrap_or_default();
     let orig = pending.len();
@@ -524,8 +690,80 @@ async fn reject_request(
     if orig == pending.len() {
         return (StatusCode::BAD_REQUEST, "no pending request").into_response();
     }
-    let _ = save_pending_requests(&paths.meta, &image_id, &pending).await;
+    let _ = save_pending_requests(&paths.meta, image_id, &pending).await;
     Json(json!({"status":"rejected","viewer": body.requester})).into_response()
+}
+
+async fn view_update(
+    State(st): State<AppState>,
+    AxumPath(image_id): AxumPath<String>,
+    Json(body): Json<UpdateViewReq>,
+) -> Response {
+    view_update_inner(&st, &image_id, body).await
+}
+
+async fn view_update_owner(
+    State(st): State<AppState>,
+    AxumPath((owner, image_id)): AxumPath<(String, String)>,
+    Json(body): Json<UpdateViewReq>,
+) -> Response {
+    // owner is only used for routing compatibility; enforce a match to avoid leaks
+    if let Some(resp) = owner_guard(&st, &owner) {
+        return resp;
+    }
+    view_update_inner(&st, &image_id, body).await
+}
+
+async fn view_update_inner(
+    st: &AppState,
+    image_id: &str,
+    body: UpdateViewReq,
+) -> Response {
+    let paths = resolve_owner_paths(&st.base, &st.owner, image_id).await;
+    let mut meta = load_metadata(&paths.meta, image_id)
+        .await
+        .unwrap_or_else(|_| default_metadata(&st.owner, None));
+    let entry = meta.permissions.entry(body.requester).or_insert(0);
+    *entry = (*entry + body.delta).max(0);
+    meta.last_update_ns = now_nanos();
+    ensure_owner_default_perm(&mut meta);
+    let _ = save_metadata(&paths.meta, image_id, &meta).await;
+    Json(json!({"status":"ok","permissions": meta.permissions})).into_response()
+}
+
+async fn update_permissions(
+    State(st): State<AppState>,
+    AxumPath(image_id): AxumPath<String>,
+    Json(body): Json<UpdatePermissionsReq>,
+) -> Response {
+    update_permissions_inner(&st, &image_id, body).await
+}
+
+async fn update_permissions_owner(
+    State(st): State<AppState>,
+    AxumPath((owner, image_id)): AxumPath<(String, String)>,
+    Json(body): Json<UpdatePermissionsReq>,
+) -> Response {
+    if let Some(resp) = owner_guard(&st, &owner) {
+        return resp;
+    }
+    update_permissions_inner(&st, &image_id, body).await
+}
+
+async fn update_permissions_inner(
+    st: &AppState,
+    image_id: &str,
+    body: UpdatePermissionsReq,
+) -> Response {
+    let paths = resolve_owner_paths(&st.base, &st.owner, image_id).await;
+    let mut meta = load_metadata(&paths.meta, image_id)
+        .await
+        .unwrap_or_else(|_| default_metadata(&st.owner, None));
+    meta.permissions.insert(body.target_user, body.new_quota);
+    meta.last_update_ns = now_nanos();
+    ensure_owner_default_perm(&mut meta);
+    let _ = save_metadata(&paths.meta, image_id, &meta).await;
+    Json(json!({"status":"ok","permissions": meta.permissions})).into_response()
 }
 
 // helpers
