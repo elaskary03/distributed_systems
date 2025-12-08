@@ -732,8 +732,15 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         cachedUsersList = list;
         const users = parseUsers(list);
         if (!users.length) { text('#usersOut', 'No users'); return; }
-        const rows = users.map(u => `${u.user} • ${u.ip || '-'} • ${u.online ? 'online' : 'offline'} • last seen ${formatLastSeen(u.last_seen)}`);
-        text('#usersOut', rows.join('\n'));
+        const rows = users.map(u => {
+          return [
+            `name: ${u.user}`,
+            `ip: ${u.ip || '-'}`,
+            `status: ${u.online ? 'online' : 'offline'}`,
+            `last seen: ${formatLastSeen(u.last_seen)}`
+          ].join('\n');
+        });
+        text('#usersOut', rows.join('\n\n'));
       }
       catch (err) { text('#usersOut', String(err)); }
     });
@@ -752,9 +759,14 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         if (!users.length) { text('#peersOut', 'No peers found'); return; }
         const rows = users.map(u => {
           const status = u.online ? 'online' : 'offline';
-          return `${u.user} • ${u.ip || '-'} • ${status} • last seen ${formatLastSeen(u.last_seen)}`;
+          return [
+            `name: ${u.user}`,
+            `ip: ${u.ip || '-'}`,
+            `status: ${status}`,
+            `last seen: ${formatLastSeen(u.last_seen)}`
+          ].join('\n');
         });
-        text('#peersOut', rows.join('\n'));
+        text('#peersOut', rows.join('\n\n'));
       }
       catch (err) { text('#peersOut', String(err)); }
     });
