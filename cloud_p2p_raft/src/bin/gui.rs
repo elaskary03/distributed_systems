@@ -323,26 +323,16 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         </section>
       </div>
 
-      <!-- Second row: Inspect -->
+      <!-- Second row: Inspect (peers only) -->
       <div class="grid">
         <section>
           <h2>📜 Inspect</h2>
           <div class="btns" style="margin-bottom:8px">
-            <button id="usersBtn">SHOW_USERS</button>
             <button id="peersBtn">LIST_PEERS</button>
-            <button id="listBtn">LIST</button>
-          </div>
-          <div>
-            <label>SHOW_USERS Output</label>
-            <div id="usersOut" class="out"></div>
           </div>
           <div style="margin-top:10px">
             <label>LIST_PEERS Output</label>
             <div id="peersOut" class="out"></div>
-          </div>
-          <div style="margin-top:10px">
-            <label>LIST Output</label>
-            <div id="listOut" class="out"></div>
           </div>
         </section>
       </div>
@@ -382,6 +372,10 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             <img id="peerImg" style="max-width:100%; display:none; border:1px solid var(--border); border-radius:8px;" />
           </div>
         </section>
+      </div>
+
+      <!-- Pending requests below P2P -->
+      <div class="grid">
         <section id="owner-requests" style="display:none;">
           <h2>📬 Pending Requests (Owner)</h2>
           <div class="btns" style="margin-bottom:8px">
@@ -426,7 +420,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
   <script>
     const $ = sel => document.querySelector(sel);
-    const text = (id, s) => ($(id).textContent = s);
+    const text = (id, s) => { const el = $(id); if (el) el.textContent = s; };
     const escapeHtml = (s = '') => s
       .toString()
       .replace(/&/g, '&amp;')
@@ -497,7 +491,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       presenceWs.onmessage = (evt) => {
         if (typeof evt.data === 'string') {
           cachedUsersList = evt.data;
-          text('#usersOut', evt.data);
         }
       };
       presenceWs.onclose = () => {
@@ -566,7 +559,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     });
 
     function clearOutputs() {
-      ['uploadOut','usersOut','peersOut','listOut','leaderOut','loginOut','peerOut'].forEach(id => text('#'+id, ''));
+      ['uploadOut','peersOut','leaderOut','loginOut','peerOut'].forEach(id => text('#'+id, ''));
       const img = $('#peerImg'); if (img) { img.style.display = 'none'; img.src = ''; }
       closeViewer(false);
     }
@@ -665,7 +658,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       try {
         const list = await (await fetch('/api/users')).text();
         cachedUsersList = list;
-        text('#usersOut', list);
       } catch (_) {}
       await refreshOwnerRequests();
     });
@@ -725,32 +717,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       } catch (err) { text('#uploadOut', String(err)); }
     });
 
-    /* SHOW_USERS */
-    $('#usersBtn').addEventListener('click', async () => {
-      try {
-        const list = await (await fetch('/api/users')).text();
-        cachedUsersList = list;
-        const users = parseUsers(list);
-        if (!users.length) { text('#usersOut', 'No users'); return; }
-        const rows = users.map(u => {
-          return [
-            `name: ${u.user}`,
-            `ip: ${u.ip || '-'}`,
-            `status: ${u.online ? 'online' : 'offline'}`,
-            `last seen: ${formatLastSeen(u.last_seen)}`
-          ].join('\n');
-        });
-        text('#usersOut', rows.join('\n\n'));
-      }
-      catch (err) { text('#usersOut', String(err)); }
-    });
-
-    /* LIST */
-    $('#listBtn').addEventListener('click', async () => {
-      try { text('#listOut', await (await fetch('/api/list')).text()); }
-      catch (err) { text('#listOut', String(err)); }
-    });
-
     /* LIST_PEERS */
     $('#peersBtn').addEventListener('click', async () => {
       try {
@@ -759,10 +725,11 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         if (!users.length) { text('#peersOut', 'No peers found'); return; }
         const rows = users.map(u => {
           const status = u.online ? 'online' : 'offline';
+          const dot = u.online ? '🟢' : '🔴';
           return [
             `name: ${u.user}`,
             `ip: ${u.ip || '-'}`,
-            `status: ${status}`,
+            `status: ${dot} ${status}`,
             `last seen: ${formatLastSeen(u.last_seen)}`
           ].join('\n');
         });
