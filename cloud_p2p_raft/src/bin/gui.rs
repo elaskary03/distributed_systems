@@ -387,7 +387,16 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           <div id="sentRequestCount" class="hint"></div>
 
           <div id="requestsReceivedPane">
-            <div id="requestsList" class="out"></div>
+            <div style="display:grid; gap:10px;">
+              <div>
+                <h4 style="margin:0 0 6px 0;">New access requests</h4>
+                <div id="requestsListNew" class="out"></div>
+              </div>
+              <div>
+                <h4 style="margin:0 0 6px 0;">More views requests</h4>
+                <div id="requestsListMore" class="out"></div>
+              </div>
+            </div>
             <div class="row" style="margin-top:10px">
               <div>
                 <label>Revoke: Image ID</label>
@@ -405,7 +414,16 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           </div>
 
           <div id="requestsSentPane" style="display:none;">
-            <div id="sentRequestsList" class="out"></div>
+            <div style="display:grid; gap:10px;">
+              <div>
+                <h4 style="margin:0 0 6px 0;">Sent: New access</h4>
+                <div id="sentRequestsListNew" class="out"></div>
+              </div>
+              <div>
+                <h4 style="margin:0 0 6px 0;">Sent: More views / approvals</h4>
+                <div id="sentRequestsListMore" class="out"></div>
+              </div>
+            </div>
           </div>
         </section>
       </div>
@@ -770,6 +788,25 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       return cachedUsersList;
     }
 
+    async function hasAccessToImage(owner, imageId) {
+      if (!owner || !imageId || !currentUser) return false;
+      try {
+        const url = `${P2P_BASE}/list-images?owner=${encodeURIComponent(owner)}&requester=${encodeURIComponent(currentUser)}`;
+        const res = await fetch(url);
+        if (!res.ok) return false;
+        const data = await res.json();
+        const img = (data.images || []).find(i => i.id === imageId);
+        if (!img) return false;
+        const remaining = img.remaining_views_for_requester;
+        const perms = (img.permissions && typeof img.permissions === 'object') ? img.permissions[currentUser] : undefined;
+        const hasRemaining = typeof remaining === 'number' && remaining > 0;
+        const hasPerm = typeof perms === 'number' && perms > 0;
+        return hasRemaining || hasPerm;
+      } catch (_) {
+        return false;
+      }
+    }
+
     function parseUsers(body) {
       const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
       return lines
@@ -1073,14 +1110,14 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
 
     function renderRequests(mode = 'received') {
       const isSent = mode === 'sent';
-      const container = isSent ? document.getElementById('sentRequestsList') : document.getElementById('requestsList');
       const pendingNew = isSent ? pendingSentNewCache : pendingNewCache;
       const pendingMore = isSent ? pendingSentMoreCache : pendingMoreCache;
-      if (!container) return;
+      const newContainer = isSent ? document.getElementById('sentRequestsListNew') : document.getElementById('requestsListNew');
+      const moreContainer = isSent ? document.getElementById('sentRequestsListMore') : document.getElementById('requestsListMore');
       const renderGroup = (list, kind) => {
         if (!list.length) return '<div class="hint">None</div>';
         return list.map((req, idx) => {
-          const ownerLine = isSent ? `<div><strong>Owner:</strong> ${req.owner}</div>` : '';
+          const ownerLine = isSent ? `<div><strong>Owner:</strong> ${escapeHtml(req.owner || '')}</div>` : '';
           const statusLine = isSent ? `<div><strong>Status:</strong> ${escapeHtml(req.status || 'pending')}</div>` : '';
           return `
           <div class="req" data-img="${req.image}" data-viewer="${req.viewer}" data-kind="${kind}" data-idx="${idx}">
@@ -1100,21 +1137,12 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         }).join('\n');
       };
 
-      const any = pendingNew.length + pendingMore.length;
-      if (!any) {
-        container.textContent = 'No pending requests';
-        return;
+      if (newContainer) {
+        newContainer.innerHTML = renderGroup(pendingNew, 'new');
       }
-      container.innerHTML = `
-        <div style="margin-bottom:10px;">
-          <h4>New access requests</h4>
-          ${renderGroup(pendingNew, 'new')}
-        </div>
-        <div>
-          <h4>More views requests</h4>
-          ${renderGroup(pendingMore, 'more')}
-        </div>
-      `;
+      if (moreContainer) {
+        moreContainer.innerHTML = renderGroup(pendingMore, 'more');
+      }
     }
 
     /* P2P actions */
@@ -1222,7 +1250,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       await revokeAccess();
     });
 
-    document.getElementById('requestsList').addEventListener('click', async (e) => {
+    document.getElementById('requestsReceivedPane').addEventListener('click', async (e) => {
       const btn = e.target;
       if (btn.classList.contains('approve-btn')) {
         const idx = parseInt(btn.dataset.idx || '-1', 10);
@@ -1232,7 +1260,10 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         if (!req) return;
         const input = document.getElementById(`${kind}-approve-${idx}`);
         const approved = parseInt((input?.value || '0'), 10);
-        if (!approved || approved <= 0) { text('#requestsList', 'Approved views must be positive'); return; }
+        if (!approved || approved <= 0) {
+          text('#requestsListNew', 'Approved views must be positive');
+          return;
+        }
         const passInput = document.getElementById(`${kind}-pass-${idx}`);
         const passphrase = (passInput?.value || '').trim();
         const url = `${P2P_BASE}/approve-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
@@ -1293,6 +1324,11 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const info = await resolvePeer(peer, { allowOffline: true });
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
         const owner = info.user || peer;
+        const hasAccess = await hasAccessToImage(owner, imgId);
+        if (!hasAccess) {
+          text('#peerOut', 'You need existing access/remaining views before requesting more.');
+          return;
+        }
         const url = `${P2P_BASE}/request-image/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}`;
         const res = await fetch(url, {
           method: 'POST',
