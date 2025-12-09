@@ -51,6 +51,8 @@ struct Metadata {
     permissions: HashMap<String, i64>,
     #[serde(default)]
     shared_passphrases: HashMap<String, String>,
+    #[serde(default)]
+    default_passphrase: Option<String>,
     last_update_ns: u128,
 }
 
@@ -128,6 +130,7 @@ async fn upload_image(
     let mut permissions_raw: Option<String> = None;
     let mut image_bytes: Option<Vec<u8>> = None;
     let mut preview_bytes: Option<Vec<u8>> = None;
+    let mut passphrase: Option<String> = None;
 
     while let Ok(Some(field)) = mp.next_field().await {
         let name = field.name().unwrap_or("").to_string();
@@ -135,6 +138,7 @@ async fn upload_image(
             "image_id" => image_id = field.text().await.ok(),
             "owner" => owner = field.text().await.ok(),
             "permissions" => permissions_raw = field.text().await.ok(),
+            "passphrase" => passphrase = field.text().await.ok(),
             "file" => {
                 if let Ok(bytes) = field.bytes().await {
                     image_bytes = Some(bytes.to_vec());
@@ -181,6 +185,11 @@ async fn upload_image(
     let mut meta = default_metadata(&owner, base_perms.clone());
     if let Some(p) = base_perms {
         meta.permissions = p;
+    }
+    if let Some(pw) = passphrase.as_ref().map(|s| s.trim().to_string()) {
+        if !pw.is_empty() {
+            meta.default_passphrase = Some(pw);
+        }
     }
 
     // Save original (use provided preview/original bytes when available)
@@ -465,10 +474,21 @@ async fn approve_request(
     *entry += body.views;
     meta.last_update_ns = now_nanos();
     ensure_owner_default_perm(&mut meta);
-    if let Some(pw) = body.passphrase.as_ref() {
-        if !pw.trim().is_empty() {
-            meta.shared_passphrases
-                .insert(body.requester.clone(), pw.trim().to_string());
+    let pass_to_share = body
+        .passphrase
+        .as_ref()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+        .or_else(|| meta.shared_passphrases.get(&body.requester).cloned())
+        .or_else(|| meta.default_passphrase.clone())
+        .or_else(|| meta.shared_passphrases.values().next().cloned());
+
+    if let Some(pw) = pass_to_share {
+        meta.shared_passphrases
+            .insert(body.requester.clone(), pw.clone());
+        if meta.default_passphrase.is_none() {
+            meta.default_passphrase = Some(pw);
         }
     }
 
@@ -733,6 +753,7 @@ fn default_metadata(owner: &str, base: Option<HashMap<String, i64>>) -> Metadata
         owner: owner.to_string(),
         permissions,
         shared_passphrases: HashMap::new(),
+        default_passphrase: None,
         last_update_ns: now_nanos(),
     }
 }

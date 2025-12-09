@@ -724,14 +724,16 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
                 previewBlob = await origResp.blob();
               } catch (_) {}
             }
-            const fdUpload = new FormData();
-            fdUpload.append('image_id', imageId);
-            fdUpload.append('owner', currentUser);
-            fdUpload.append('permissions', JSON.stringify({}));
-            fdUpload.append('file', new File([pngBlob], fileBase, { type: 'image/png' }));
-            if (previewBlob) {
-              fdUpload.append('preview', new File([previewBlob], `preview-${fileBase}`, { type: 'image/png' }));
-            }
+          const fdUpload = new FormData();
+          fdUpload.append('image_id', imageId);
+          fdUpload.append('owner', currentUser);
+          fdUpload.append('permissions', JSON.stringify({}));
+          fdUpload.append('file', new File([pngBlob], fileBase, { type: 'image/png' }));
+          if (previewBlob) {
+            fdUpload.append('preview', new File([previewBlob], `preview-${fileBase}`, { type: 'image/png' }));
+          }
+          const pass = (fd.get('passphrase') || '').toString();
+          if (pass) { fdUpload.append('passphrase', pass); }
 
             let uploadTarget = null;
             try { uploadTarget = await resolvePeer(currentUser); } catch (_) {}
@@ -1129,7 +1131,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
             ${isSent ? '' : `
               <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
                 <input type="number" id="${kind}-approve-${idx}" value="${req.requested}" min="1" style="width:90px;">
-                <input type="text" id="${kind}-pass-${idx}" placeholder="passphrase (optional)" style="width:180px;">
                 <button class="approve-btn" data-kind="${kind}" data-idx="${idx}">Approve</button>
                 <button class="reject-btn" data-kind="${kind}" data-idx="${idx}">Reject</button>
               </div>`}
@@ -1264,13 +1265,11 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
           text('#requestsListNew', 'Approved views must be positive');
           return;
         }
-        const passInput = document.getElementById(`${kind}-pass-${idx}`);
-        const passphrase = (passInput?.value || '').trim();
         const url = `${P2P_BASE}/approve-request/${encodeURIComponent(currentUser)}/${encodeURIComponent(req.image)}`;
         await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requester: req.viewer, views: approved, passphrase }),
+          body: JSON.stringify({ requester: req.viewer, views: approved }),
         });
         await refreshOwnerRequests();
       } else if (btn.classList.contains('reject-btn')) {
