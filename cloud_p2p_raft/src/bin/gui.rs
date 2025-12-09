@@ -354,10 +354,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
               <label>Requested Views</label>
               <input id="peerViews" type="number" value="1" min="1">
             </div>
-            <div>
-              <label>Passphrase (for FULL decrypt)</label>
-              <input id="peerPassphrase" type="password" placeholder="required to view full image">
-            </div>
           </div>
           <div class="btns" style="margin-top:8px">
             <button id="peerListBtn">LIST_IMAGES</button>
@@ -625,9 +621,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
               const remaining = img.remaining_views_for_requester !== undefined
                 ? `Remaining (you): ${img.remaining_views_for_requester}`
                 : 'Remaining: -';
-              const sharedPw = img.shared_passphrase
-                ? `Passphrase: ${escapeHtml(img.shared_passphrase)}`
-                : '';
               const perms = img.permissions && typeof img.permissions === 'object'
                 ? `Permissions: ${Object.entries(img.permissions).map(([k,v]) => `${escapeHtml(k)}=${v}`).join(', ')}`
                 : '';
@@ -635,7 +628,6 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
                 <div class="image-chip" style="display:flex; flex-direction:column; align-items:flex-start; gap:4px;">
                   <div><code>${id}</code>${owner ? ` • owner: ${owner}` : ''}</div>
                   <div class="hint">${remaining}</div>
-                  ${sharedPw ? `<div class="hint">${sharedPw}</div>` : ''}
                   ${perms ? `<div class="hint">${perms}</div>` : ''}
                 </div>
               `;
@@ -924,6 +916,21 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       return results;
     }
 
+    async function resolveSharedPassphrase(owner, imageId) {
+      if (!owner || !imageId || !currentUser) return null;
+      try {
+        const url = `${P2P_BASE}/list-images?owner=${encodeURIComponent(owner)}&requester=${encodeURIComponent(currentUser)}`;
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        const data = await res.json();
+        const img = (data.images || []).find(i => i.id === imageId);
+        if (!img) return null;
+        return img.shared_passphrase || null;
+      } catch (_) {
+        return null;
+      }
+    }
+
     function mergeUsers(cached, live) {
       const map = new Map();
       for (const u of cached || []) {
@@ -1187,14 +1194,14 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     $('#peerFullBtn').addEventListener('click', async () => {
       const peer = ($('#peerUser').value || '').trim();
       const imgId = ($('#peerImageId').value || '').trim();
-      const pass = ($('#peerPassphrase').value || '').trim();
       if (!currentUser) { text('#peerOut', 'login required to view full images'); return; }
       if (!peer || !imgId) { text('#peerOut', 'peer username and image_id required'); return; }
-      if (!pass) { text('#peerOut', 'passphrase required for FULL view'); return; }
       try {
         const info = await resolvePeer(peer);
         if (!info) { text('#peerOut', `peer ${peer} not found/online`); return; }
         const owner = info.user || peer;
+        const pass = await resolveSharedPassphrase(owner, imgId);
+        if (!pass) { text('#peerOut', 'Missing shared passphrase for this image'); return; }
         const url = `${P2P_BASE}/full/${encodeURIComponent(owner)}/${encodeURIComponent(imgId)}?requester=${encodeURIComponent(currentUser)}`;
         const res = await fetch(url);
         const ct = res.headers.get('content-type') || '';
