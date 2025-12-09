@@ -257,6 +257,13 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     .image-chip{ padding:6px 8px; border:1px dashed var(--border); border-radius:8px; background:#f9fafb; }
     .image-chip code{ background:none; padding:0; }
 
+    .access-grid{ display:grid; gap:10px; }
+    .access-card{ border:1px dashed var(--border); border-radius:12px; padding:12px; background:#f9fafb; }
+    .access-card h5{ margin:0 0 6px 0; font-size:14px; }
+    .access-rows{ display:flex; flex-direction:column; gap:8px; margin-top:6px; }
+    .access-row{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; padding:8px; border:1px solid var(--border); border-radius:10px; background:#fff; }
+    .access-row-actions{ display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+
     .hint{ color: var(--muted); font-size: 12px; margin-top: 8px; }
     .pill{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border); background:#fff; }
   </style>
@@ -393,20 +400,12 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
                 <div id="requestsListMore" class="out"></div>
               </div>
             </div>
-            <div class="row" style="margin-top:10px">
-              <div>
-                <label>Revoke: Image ID</label>
-                <input id="revokeImageId" type="text" placeholder="img-...">
-              </div>
-              <div>
-                <label>Revoke: Target User</label>
-                <input id="revokeUser" type="text" placeholder="viewer username">
-              </div>
-              <div class="btns" style="margin-top:8px">
-                <button id="revokeBtn" class="btn-warn">REVOKE ACCESS</button>
-              </div>
+            <div style="margin-top:12px">
+              <h4 style="margin:0 0 6px 0;">Access you granted</h4>
+              <div class="hint">Owned images plus who can view them. Adjust remaining views or revoke directly.</div>
+              <div id="ownerAccessList" class="access-grid"></div>
+              <div id="revokeOut" class="out"></div>
             </div>
-            <div id="revokeOut" class="out"></div>
           </div>
 
           <div id="requestsSentPane" style="display:none;">
@@ -464,6 +463,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     let pendingMoreCache = [];
     let pendingSentNewCache = [];
     let pendingSentMoreCache = [];
+    let ownedImagesCache = [];
     let activeRequestTab = 'received';
     let sentHistory = new Map();
     let activeViewer = null;
@@ -972,6 +972,7 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const res = await fetch(url);
         if (!res.ok) return;
         const data = await res.json();
+        ownedImagesCache = (Array.isArray(data.images) ? data.images : []).filter(img => (img.owner || currentUser) === currentUser);
         const pendingNew = [];
         const pendingMore = [];
         for (const img of data.images || []) {
@@ -989,8 +990,12 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         const total = pendingNew.length + pendingMore.length;
         text('#requestCount', `${total} pending request(s): ${pendingNew.length} new, ${pendingMore.length} more-views`);
         renderRequests('received');
+        renderOwnerAccess();
         document.getElementById('owner-requests').style.display = 'block';
-      } catch (_) {}
+      } catch (_) {
+        ownedImagesCache = [];
+        renderOwnerAccess();
+      }
     }
 
     async function refreshSentRequests() {
@@ -1093,9 +1098,9 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       sentHistory.set(key, { owner, image, requested, viewer: currentUser, status: 'pending' });
     }
 
-    async function revokeAccess() {
-      const imageId = ($('#revokeImageId').value || '').trim();
-      const target = ($('#revokeUser').value || '').trim();
+    async function revokeAccess(imageIdOverride, targetOverride) {
+      const imageId = (imageIdOverride || $('#revokeImageId')?.value || '').trim();
+      const target = (targetOverride || $('#revokeUser')?.value || '').trim();
       if (!currentUser) { text('#revokeOut', 'Login first'); return; }
       if (!imageId || !target) { text('#revokeOut', 'Image ID and target user required'); return; }
       try {
@@ -1111,6 +1116,28 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
         }
         const data = await res.json();
         text('#revokeOut', JSON.stringify(data, null, 2));
+        await refreshOwnerRequests();
+      } catch (err) {
+        text('#revokeOut', String(err));
+      }
+    }
+
+    async function updatePermissionQuota(imageId, target, newQuota) {
+      if (!currentUser) { text('#revokeOut', 'Login first'); return; }
+      if (!imageId || !target) { text('#revokeOut', 'Image ID and target user required'); return; }
+      if (newQuota < 0) { text('#revokeOut', 'Views must be zero or more'); return; }
+      try {
+        const url = `${P2P_BASE}/update-permissions/${encodeURIComponent(currentUser)}/${encodeURIComponent(imageId)}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target_user: target, new_quota: newQuota }),
+        });
+        if (!res.ok) {
+          text('#revokeOut', `Error: ${await res.text()}`);
+          return;
+        }
+        text('#revokeOut', `Updated ${target} to ${newQuota} remaining view(s).`);
         await refreshOwnerRequests();
       } catch (err) {
         text('#revokeOut', String(err));
@@ -1151,6 +1178,47 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
       if (moreContainer) {
         moreContainer.innerHTML = renderGroup(pendingMore, 'more');
       }
+    }
+
+    function renderOwnerAccess() {
+      const container = document.getElementById('ownerAccessList');
+      if (!container) return;
+      if (!ownedImagesCache.length) {
+        container.innerHTML = '<div class="hint">No owned images yet.</div>';
+        return;
+      }
+      container.innerHTML = ownedImagesCache.map(img => {
+        const id = escapeHtml(img.id || 'unknown');
+        const permissions = (img.permissions && typeof img.permissions === 'object') ? Object.entries(img.permissions) : [];
+        const viewers = permissions.filter(([viewer]) => (viewer || '') !== currentUser);
+        const rows = viewers.length ? viewers.map(([viewer, quota]) => {
+          const remaining = typeof quota === 'number' ? quota : parseInt(quota || '0', 10) || 0;
+          return `
+            <div class="access-row" data-image="${id}" data-viewer="${escapeHtml(viewer)}">
+              <div style="display:flex; flex-direction:column; gap:2px;">
+                <div><strong>${escapeHtml(viewer)}</strong></div>
+                <div class="hint">Remaining views: ${remaining}</div>
+              </div>
+              <div class="access-row-actions">
+                <input type="number" class="access-quota" min="0" value="${remaining}" style="width:96px;" aria-label="Remaining views for ${escapeHtml(viewer)}">
+                <button class="access-update" data-image="${id}" data-viewer="${escapeHtml(viewer)}">Update</button>
+                <button class="access-revoke btn-warn" data-image="${id}" data-viewer="${escapeHtml(viewer)}">Revoke</button>
+              </div>
+            </div>
+          `;
+        }).join('') : '<div class="hint">No viewers yet for this image.</div>';
+        return `
+          <div class="access-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+              <h5>Image: <code>${id}</code></h5>
+              <span class="pill">Owned</span>
+            </div>
+            <div class="access-rows">
+              ${rows}
+            </div>
+          </div>
+        `;
+      }).join('');
     }
 
     /* P2P actions */
@@ -1254,9 +1322,35 @@ async fn ui(State(st): State<AppState>) -> impl IntoResponse {
     $('#tabReceived').addEventListener('click', () => setRequestTab('received'));
     $('#tabSent').addEventListener('click', () => setRequestTab('sent'));
 
-    $('#revokeBtn').addEventListener('click', async () => {
-      await revokeAccess();
-    });
+    const revokeBtn = document.getElementById('revokeBtn');
+    if (revokeBtn) {
+      revokeBtn.addEventListener('click', async () => {
+        await revokeAccess();
+      });
+    }
+
+    const ownerAccessList = document.getElementById('ownerAccessList');
+    if (ownerAccessList) {
+      ownerAccessList.addEventListener('click', async (e) => {
+        const btn = e.target;
+        if (!(btn instanceof HTMLElement)) return;
+        const row = btn.closest('.access-row');
+        if (!row) return;
+        const imageId = row.dataset.image || '';
+        const viewer = row.dataset.viewer || '';
+        if (btn.classList.contains('access-revoke')) {
+          await revokeAccess(imageId, viewer);
+        } else if (btn.classList.contains('access-update')) {
+          const input = row.querySelector('.access-quota');
+          const quota = parseInt((input?.value || '0'), 10);
+          if (!Number.isFinite(quota) || quota < 0) {
+            text('#revokeOut', 'Views must be zero or more');
+            return;
+          }
+          await updatePermissionQuota(imageId, viewer, quota);
+        }
+      });
+    }
 
     document.getElementById('requestsReceivedPane').addEventListener('click', async (e) => {
       const btn = e.target;
